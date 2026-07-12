@@ -1,8 +1,12 @@
+import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { Mission, MissionCategory, MissionDifficulty } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { GenerateMissionsDto } from './dto/generate-missions.dto';
 import { MissionsService } from './missions.service';
+
+const USER_ID = '22222222-2222-2222-2222-222222222222';
+const MISSION_ID = '11111111-1111-1111-1111-111111111111';
 
 /** Builds a Mission row with sensible, wide-matching defaults; override per test. */
 function makeMission(overrides: Partial<Mission> = {}): Mission {
@@ -39,11 +43,26 @@ const BASE_DTO: GenerateMissionsDto = {
 describe('MissionsService', () => {
   let service: MissionsService;
   let findMany: jest.Mock;
+  let findUnique: jest.Mock;
+  let upsert: jest.Mock;
+  let deleteMany: jest.Mock;
 
   beforeEach(async () => {
     findMany = jest.fn();
+    findUnique = jest.fn();
+    upsert = jest.fn();
+    deleteMany = jest.fn();
     const module: TestingModule = await Test.createTestingModule({
-      providers: [MissionsService, { provide: PrismaService, useValue: { mission: { findMany } } }],
+      providers: [
+        MissionsService,
+        {
+          provide: PrismaService,
+          useValue: {
+            mission: { findMany, findUnique },
+            savedMission: { upsert, deleteMany },
+          },
+        },
+      ],
     }).compile();
 
     service = module.get(MissionsService);
@@ -225,6 +244,84 @@ describe('MissionsService', () => {
         diff: 'Medium',
         dots: 2,
       });
+    });
+  });
+
+  describe('saveMission', () => {
+    it('upserts a save for an active mission and returns { saved: true }', async () => {
+      findUnique.mockResolvedValue({ id: MISSION_ID, isActive: true, deletedAt: null });
+      upsert.mockResolvedValue({});
+
+      const res = await service.saveMission(USER_ID, MISSION_ID);
+
+      expect(res).toEqual({ saved: true });
+      expect(upsert).toHaveBeenCalledWith({
+        where: { userId_missionId: { userId: USER_ID, missionId: MISSION_ID } },
+        create: { userId: USER_ID, missionId: MISSION_ID },
+        update: {},
+      });
+    });
+
+    it('is idempotent: saving twice never throws and still returns { saved: true } each time', async () => {
+      findUnique.mockResolvedValue({ id: MISSION_ID, isActive: true, deletedAt: null });
+      // upsert on the (userId, missionId) unique constraint no-ops the second
+      // time instead of raising a conflict — both calls resolve identically.
+      upsert.mockResolvedValue({});
+
+      const first = await service.saveMission(USER_ID, MISSION_ID);
+      const second = await service.saveMission(USER_ID, MISSION_ID);
+
+      expect(first).toEqual({ saved: true });
+      expect(second).toEqual({ saved: true });
+      expect(upsert).toHaveBeenCalledTimes(2);
+    });
+
+    it('throws NotFoundException when the mission does not exist', async () => {
+      findUnique.mockResolvedValue(null);
+      await expect(service.saveMission(USER_ID, MISSION_ID)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(upsert).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when the mission is inactive', async () => {
+      findUnique.mockResolvedValue({ id: MISSION_ID, isActive: false, deletedAt: null });
+      await expect(service.saveMission(USER_ID, MISSION_ID)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(upsert).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when the mission is soft-deleted', async () => {
+      findUnique.mockResolvedValue({ id: MISSION_ID, isActive: true, deletedAt: new Date() });
+      await expect(service.saveMission(USER_ID, MISSION_ID)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(upsert).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('unsaveMission', () => {
+    it('deletes the save and returns { saved: false }', async () => {
+      deleteMany.mockResolvedValue({ count: 1 });
+
+      const res = await service.unsaveMission(USER_ID, MISSION_ID);
+
+      expect(res).toEqual({ saved: false });
+      expect(deleteMany).toHaveBeenCalledWith({
+        where: { userId: USER_ID, missionId: MISSION_ID },
+      });
+    });
+
+    it('is idempotent: deleting a non-existent save (count 0) does not throw', async () => {
+      deleteMany.mockResolvedValue({ count: 0 });
+
+      const first = await service.unsaveMission(USER_ID, MISSION_ID);
+      const second = await service.unsaveMission(USER_ID, MISSION_ID);
+
+      expect(first).toEqual({ saved: false });
+      expect(second).toEqual({ saved: false });
+      expect(deleteMany).toHaveBeenCalledTimes(2);
     });
   });
 });

@@ -1,8 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Mission } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { BudgetValue, GenerateMissionsDto, TimeValue } from './dto/generate-missions.dto';
-import { GenerateMissionsResponseDto, MissionResponseDto } from './dto/mission-response.dto';
+import { GenerateMissionsResponseDto } from './dto/mission-response.dto';
+import { SaveMissionResponseDto } from './dto/save-mission-response.dto';
+import { toMissionResponse } from './mission-response.mapper';
 
 /** Max mission length (in minutes) a given time budget is willing to see. */
 const TIME_CEILINGS: Record<TimeValue, number> = {
@@ -57,7 +59,46 @@ export class MissionsService {
         `→ ${qualifying.length} qualifying, returned ${selected.length}`,
     );
 
-    return { missions: selected.map((mission) => this.toResponse(mission)) };
+    return { missions: selected.map((mission) => toMissionResponse(mission)) };
+  }
+
+  /**
+   * Idempotently marks a mission saved for the current user. A repeat call is a
+   * no-op (the `(userId, missionId)` unique constraint means `upsert` never
+   * creates a duplicate and never throws a conflict) — the endpoint just
+   * confirms the resulting state. 404s if the mission is missing or inactive so
+   * the client cannot bookmark a quest it can never see again.
+   */
+  async saveMission(userId: string, missionId: string): Promise<SaveMissionResponseDto> {
+    const mission = await this.prisma.mission.findUnique({
+      where: { id: missionId },
+      select: { id: true, isActive: true, deletedAt: true },
+    });
+    if (!mission || !mission.isActive || mission.deletedAt) {
+      throw new NotFoundException('Mission not found or inactive');
+    }
+
+    await this.prisma.savedMission.upsert({
+      where: { userId_missionId: { userId, missionId } },
+      create: { userId, missionId },
+      update: {},
+    });
+
+    this.logger.log(`Mission ${missionId} saved for user ${userId}`);
+    return { saved: true };
+  }
+
+  /**
+   * Idempotently ensures the mission is not saved for the current user.
+   * `deleteMany` removes the row if present and quietly matches zero rows if
+   * not — deleting a non-existent save is not an error, and no mission-existence
+   * check is needed to un-bookmark.
+   */
+  async unsaveMission(userId: string, missionId: string): Promise<SaveMissionResponseDto> {
+    await this.prisma.savedMission.deleteMany({ where: { userId, missionId } });
+
+    this.logger.log(`Mission ${missionId} unsaved for user ${userId}`);
+    return { saved: false };
   }
 
   /** True when a mission satisfies all four context rules simultaneously. */
@@ -86,21 +127,5 @@ export class MissionsService {
       [copy[i], copy[j]] = [copy[j], copy[i]];
     }
     return copy.slice(0, count);
-  }
-
-  /** Maps a Mission row to the mobile-facing short-field contract. */
-  private toResponse(mission: Mission): MissionResponseDto {
-    return {
-      id: mission.id,
-      category: mission.category,
-      title: mission.title,
-      desc: mission.description,
-      full: mission.fullBrief,
-      proof: mission.proofRequirement,
-      time: `${mission.estimatedMinutes} min`,
-      xp: `+${mission.xpReward} XP`,
-      diff: mission.difficulty,
-      dots: mission.difficultyDots,
-    };
   }
 }
