@@ -3,6 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { Mission, MissionCategory, MissionDifficulty } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { GenerateMissionsDto } from './dto/generate-missions.dto';
+import { MissionPoolService } from './mission-pool.service';
 import { MissionsService } from './missions.service';
 
 const USER_ID = '22222222-2222-2222-2222-222222222222';
@@ -42,13 +43,13 @@ const BASE_DTO: GenerateMissionsDto = {
 
 describe('MissionsService', () => {
   let service: MissionsService;
-  let findMany: jest.Mock;
+  let getActivePool: jest.Mock;
   let findUnique: jest.Mock;
   let upsert: jest.Mock;
   let deleteMany: jest.Mock;
 
   beforeEach(async () => {
-    findMany = jest.fn();
+    getActivePool = jest.fn();
     findUnique = jest.fn();
     upsert = jest.fn();
     deleteMany = jest.fn();
@@ -58,9 +59,13 @@ describe('MissionsService', () => {
         {
           provide: PrismaService,
           useValue: {
-            mission: { findMany, findUnique },
+            mission: { findUnique },
             savedMission: { upsert, deleteMany },
           },
+        },
+        {
+          provide: MissionPoolService,
+          useValue: { getActivePool },
         },
       ],
     }).compile();
@@ -70,16 +75,14 @@ describe('MissionsService', () => {
 
   /** Convenience: seed the mocked pool then run generate with a full DTO. */
   async function generate(pool: Mission[], dto: Partial<GenerateMissionsDto> = {}) {
-    findMany.mockResolvedValue(pool);
+    getActivePool.mockResolvedValue(pool);
     return service.generate({ ...BASE_DTO, ...dto });
   }
 
   describe('candidate query', () => {
-    it('only ever queries active, non-deleted missions', async () => {
+    it('reads the active mission pool from MissionPoolService (cached)', async () => {
       await generate([]);
-      expect(findMany).toHaveBeenCalledWith({
-        where: { isActive: true, deletedAt: null },
-      });
+      expect(getActivePool).toHaveBeenCalledTimes(1);
     });
   });
 

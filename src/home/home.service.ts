@@ -1,5 +1,6 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { MissionPoolService } from '../missions/mission-pool.service';
 import { toMissionResponse } from '../missions/mission-response.mapper';
 import { daySeedFromDate, pickDailyMission } from './daily-mission.util';
 import { HomeResponseDto } from './dto/home-response.dto';
@@ -10,7 +11,10 @@ import { buildSavedPacks } from './saved-packs.util';
 export class HomeService {
   private readonly logger = new Logger(HomeService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly missionPool: MissionPoolService,
+  ) {}
 
   /**
    * Aggregates the Home screen payload for both guests and signed-in users in a
@@ -27,10 +31,7 @@ export class HomeService {
         where: { id: userId },
         select: { totalXp: true, currentStreak: true, longestStreak: true },
       }),
-      this.prisma.mission.findMany({
-        where: { isActive: true, deletedAt: null },
-        orderBy: { id: 'asc' },
-      }),
+      this.missionPool.getActivePool(),
       this.prisma.savedMission.findMany({
         where: { userId },
         select: { mission: { select: { settingTags: true, crewTags: true } } },

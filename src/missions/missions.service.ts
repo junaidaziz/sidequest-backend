@@ -2,6 +2,7 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Mission } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { BudgetValue, GenerateMissionsDto, TimeValue } from './dto/generate-missions.dto';
+import { MissionPoolService } from './mission-pool.service';
 import { GenerateMissionsResponseDto } from './dto/mission-response.dto';
 import { SaveMissionResponseDto } from './dto/save-mission-response.dto';
 import { toMissionResponse } from './mission-response.mapper';
@@ -29,7 +30,10 @@ const RESULT_SIZE = 3;
 export class MissionsService {
   private readonly logger = new Logger(MissionsService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly missionPool: MissionPoolService,
+  ) {}
 
   /**
    * Returns up to 3 random active missions matching the onboarding context.
@@ -45,9 +49,7 @@ export class MissionsService {
     const maxMinutes = TIME_CEILINGS[dto.time];
     const maxCostTier = BUDGET_TIERS[dto.budget];
 
-    const active = await this.prisma.mission.findMany({
-      where: { isActive: true, deletedAt: null },
-    });
+    const active = await this.missionPool.getActivePool();
 
     const qualifying = active.filter((mission) =>
       this.matches(mission, dto, maxMinutes, maxCostTier),

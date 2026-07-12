@@ -2,11 +2,11 @@ import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { Mission, MissionCategory, MissionDifficulty } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { MissionPoolService } from '../missions/mission-pool.service';
 import { HomeService } from './home.service';
 
 interface PrismaMock {
   user: { findUnique: jest.Mock };
-  mission: { findMany: jest.Mock };
   savedMission: { findMany: jest.Mock };
 }
 
@@ -39,15 +39,20 @@ function makeMission(overrides: Partial<Mission> = {}): Mission {
 describe('HomeService', () => {
   let service: HomeService;
   let prisma: PrismaMock;
+  let getActivePool: jest.Mock;
 
   beforeEach(async () => {
     prisma = {
       user: { findUnique: jest.fn() },
-      mission: { findMany: jest.fn() },
       savedMission: { findMany: jest.fn() },
     };
+    getActivePool = jest.fn();
     const module: TestingModule = await Test.createTestingModule({
-      providers: [HomeService, { provide: PrismaService, useValue: prisma }],
+      providers: [
+        HomeService,
+        { provide: PrismaService, useValue: prisma },
+        { provide: MissionPoolService, useValue: { getActivePool } },
+      ],
     }).compile();
 
     service = module.get(HomeService);
@@ -62,7 +67,7 @@ describe('HomeService', () => {
     prisma.user.findUnique.mockResolvedValue(
       opts.user === undefined ? { totalXp: 0, currentStreak: 0, longestStreak: 0 } : opts.user,
     );
-    prisma.mission.findMany.mockResolvedValue(opts.missions ?? []);
+    getActivePool.mockResolvedValue(opts.missions ?? []);
     prisma.savedMission.findMany.mockResolvedValue(opts.saved ?? []);
   }
 
@@ -71,13 +76,10 @@ describe('HomeService', () => {
     await expect(service.getHome(USER_ID)).rejects.toBeInstanceOf(NotFoundException);
   });
 
-  it('only queries active, non-deleted missions ordered by id', async () => {
+  it('reads the active mission pool from MissionPoolService (cached)', async () => {
     seed({});
     await service.getHome(USER_ID);
-    expect(prisma.mission.findMany).toHaveBeenCalledWith({
-      where: { isActive: true, deletedAt: null },
-      orderBy: { id: 'asc' },
-    });
+    expect(getActivePool).toHaveBeenCalledTimes(1);
   });
 
   it('scopes saved missions to the current user and selects only the grouping tags', async () => {
