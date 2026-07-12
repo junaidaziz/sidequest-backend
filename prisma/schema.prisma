@@ -37,6 +37,7 @@ model User {
   deletedAt    DateTime?
 
   completions  Completion[]
+  savedMissions SavedMission[]
 
   @@map("users")
 }
@@ -86,8 +87,26 @@ model Mission {
   deletedAt         DateTime?
 
   completions       Completion[]
+  savedBy           SavedMission[]
 
   @@map("missions")
+}
+
+/// A user bookmarking a mission for later ("Save for later" in the mission
+/// detail sheet). No separate "Pack" entity exists — the Home screen derives
+/// display packs by grouping a user's saved missions by shared tags at read
+/// time, so there is nothing to keep in sync when a mission's own tags change.
+model SavedMission {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  missionId String
+  mission   Mission  @relation(fields: [missionId], references: [id])
+  savedAt   DateTime @default(now())
+
+  @@unique([userId, missionId])
+  @@index([userId])
+  @@map("saved_missions")
 }
 
 enum ProofType {
