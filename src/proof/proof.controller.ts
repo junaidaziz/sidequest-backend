@@ -54,7 +54,7 @@ export class ProofController {
   constructor(private readonly proofService: ProofService) {}
 
   @Post()
-  @HttpCode(HttpStatus.OK)
+  @HttpCode(HttpStatus.CREATED)
   @UseGuards(JwtAuthGuard)
   // Proof submission is a sensitive, side-effecting write — tighter than the
   // global default per the project's rate-limit policy.
@@ -74,6 +74,7 @@ export class ProofController {
   // so the binary `photo` field appears alongside `caption` in Swagger — the
   // DTO intentionally omits `photo` (see SubmitProofDto).
   @ApiBody({
+    description: 'Provide exactly one of photo or caption — supplying both or neither is a 400.',
     schema: {
       type: 'object',
       properties: {
@@ -91,7 +92,7 @@ export class ProofController {
       },
     },
   })
-  @ApiResponse({ status: 200, type: ProofResponseDto })
+  @ApiResponse({ status: 201, type: ProofResponseDto })
   @ApiResponse({
     status: 400,
     description:
@@ -105,6 +106,7 @@ export class ProofController {
       'Guest has already used their one free completion (GUEST_COMPLETION_LIMIT_REACHED)',
   })
   @ApiResponse({ status: 404, description: 'Mission not found or inactive' })
+  @ApiResponse({ status: 413, description: 'Photo exceeds the 10MB limit' })
   submit(
     @CurrentUser() user: AuthUser,
     @Param('missionId', ParseUUIDPipe) missionId: string,
