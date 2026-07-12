@@ -50,7 +50,12 @@ export class AllExceptionsFilter implements ExceptionFilter {
     };
 
     if (status >= HttpStatus.INTERNAL_SERVER_ERROR) {
-      this.logger.error(`${request.method} ${request.url}`, (exception as Error)?.stack);
+      const rawRequestId = request.headers?.['x-request-id'];
+      const requestId = Array.isArray(rawRequestId) ? rawRequestId[0] : rawRequestId;
+      this.logger.error(
+        `${request.method} ${request.url}${requestId ? ` [${requestId}]` : ''}`,
+        (exception as Error)?.stack,
+      );
     }
 
     response.status(status).json(body);

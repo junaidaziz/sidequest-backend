@@ -14,7 +14,10 @@ interface CapturedResponse {
   body: Record<string, unknown> | null;
 }
 
-function buildHost(captured: CapturedResponse): ArgumentsHost {
+function buildHost(
+  captured: CapturedResponse,
+  headers: Record<string, string> = {},
+): ArgumentsHost {
   const response = {
     status: (code: number) => {
       captured.statusCode = code;
@@ -25,7 +28,7 @@ function buildHost(captured: CapturedResponse): ArgumentsHost {
       };
     },
   };
-  const request = { url: '/auth/login', method: 'POST' };
+  const request = { url: '/auth/login', method: 'POST', headers };
   return {
     switchToHttp: () => ({
       getResponse: () => response,
@@ -81,6 +84,27 @@ describe('AllExceptionsFilter', () => {
     expect(captured.statusCode).toBe(HttpStatus.INTERNAL_SERVER_ERROR);
     expect(captured.body).toMatchObject({ message: 'Internal server error' });
     expect(logSpy).toHaveBeenCalled();
+  });
+
+  it('includes the x-request-id header in the 500 log line when present', () => {
+    const captured: CapturedResponse = { statusCode: 0, body: null };
+    const logSpy = jest.spyOn(filter['logger'], 'error');
+
+    filter.catch(new Error('boom'), buildHost(captured, { 'x-request-id': 'trace-xyz' }));
+
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('[trace-xyz]'), expect.anything());
+  });
+
+  it('uses the first value when x-request-id arrives as an array (duplicate headers)', () => {
+    const captured: CapturedResponse = { statusCode: 0, body: null };
+    const logSpy = jest.spyOn(filter['logger'], 'error');
+
+    filter.catch(
+      new Error('boom'),
+      buildHost(captured, { 'x-request-id': ['first-id', 'second-id'] as unknown as string }),
+    );
+
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('[first-id]'), expect.anything());
   });
 
   it('falls back to a generic message for a wrapped 500 with no useful body', () => {
