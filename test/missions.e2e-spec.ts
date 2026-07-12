@@ -24,6 +24,8 @@ describe('Missions (e2e)', () => {
   const titleA = `E2E Quick Indoor A ${stamp}`;
   const titleB = `E2E Quick Indoor B ${stamp}`;
   const seededTitles = [titleA, titleB];
+  let missionAId: string;
+  const createdUserIds: string[] = [];
 
   const matchingContext = {
     crew: 'Kids Mode',
@@ -31,6 +33,13 @@ describe('Missions (e2e)', () => {
     setting: 'Indoors',
     budget: 'Free',
   };
+
+  /** Creates a fresh guest session and returns its access token + user id. */
+  async function createGuest(): Promise<{ token: string; userId: string }> {
+    const res = await request(app.getHttpServer()).post('/auth/guest').expect(201);
+    createdUserIds.push(res.body.user.id);
+    return { token: res.body.accessToken, userId: res.body.user.id };
+  }
 
   beforeAll(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
@@ -58,11 +67,24 @@ describe('Missions (e2e)', () => {
       costTier: 0,
       isActive: true,
     };
-    await prisma.mission.create({ data: { ...base, title: titleA, xpReward: 25 } });
+    const createdA = await prisma.mission.create({
+      data: { ...base, title: titleA, xpReward: 25 },
+    });
+    missionAId = createdA.id;
     await prisma.mission.create({ data: { ...base, title: titleB, xpReward: 30 } });
   });
 
   afterAll(async () => {
+    const missions = await prisma.mission.findMany({
+      where: { title: { in: seededTitles } },
+      select: { id: true },
+    });
+    const missionIds = missions.map((m) => m.id);
+    await prisma.savedMission.deleteMany({ where: { missionId: { in: missionIds } } });
+    if (createdUserIds.length > 0) {
+      await prisma.savedMission.deleteMany({ where: { userId: { in: createdUserIds } } });
+      await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+    }
     await prisma.mission.deleteMany({ where: { title: { in: seededTitles } } });
     await app.close();
   });
@@ -122,6 +144,72 @@ describe('Missions (e2e)', () => {
         .post('/missions/generate')
         .send({ ...matchingContext, sneaky: true })
         .expect(400);
+    });
+  });
+
+  describe('POST/DELETE /missions/:missionId/save', () => {
+    it('returns 401 for save without an access token', async () => {
+      await request(app.getHttpServer()).post(`/missions/${missionAId}/save`).expect(401);
+    });
+
+    it('returns 401 for unsave without an access token', async () => {
+      await request(app.getHttpServer()).delete(`/missions/${missionAId}/save`).expect(401);
+    });
+
+    it('returns 404 when saving a valid but non-existent mission id', async () => {
+      const { token } = await createGuest();
+      await request(app.getHttpServer())
+        .post(`/missions/00000000-0000-0000-0000-000000000000/save`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(404);
+    });
+
+    it('saves idempotently: two saves both return { saved: true } and create exactly one row', async () => {
+      const { token, userId } = await createGuest();
+
+      const first = await request(app.getHttpServer())
+        .post(`/missions/${missionAId}/save`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      expect(first.body).toEqual({ saved: true });
+
+      const second = await request(app.getHttpServer())
+        .post(`/missions/${missionAId}/save`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      expect(second.body).toEqual({ saved: true });
+
+      const rows = await prisma.savedMission.count({
+        where: { userId, missionId: missionAId },
+      });
+      expect(rows).toBe(1);
+    });
+
+    it('unsaves idempotently: deleting twice both return { saved: false } and leave no row', async () => {
+      const { token, userId } = await createGuest();
+
+      await request(app.getHttpServer())
+        .post(`/missions/${missionAId}/save`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+
+      const first = await request(app.getHttpServer())
+        .delete(`/missions/${missionAId}/save`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      expect(first.body).toEqual({ saved: false });
+
+      // Deleting an already-removed save is not an error.
+      const second = await request(app.getHttpServer())
+        .delete(`/missions/${missionAId}/save`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      expect(second.body).toEqual({ saved: false });
+
+      const rows = await prisma.savedMission.count({
+        where: { userId, missionId: missionAId },
+      });
+      expect(rows).toBe(0);
     });
   });
 });
