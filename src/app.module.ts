@@ -9,6 +9,7 @@ import { AuthModule } from './auth/auth.module';
 import { MissionsModule } from './missions/missions.module';
 import { StorageModule } from './storage/storage.module';
 import { ProofModule } from './proof/proof.module';
+import { HomeModule } from './home/home.module';
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { ProofModule } from './proof/proof.module';
     MissionsModule,
     StorageModule,
     ProofModule,
+    HomeModule,
   ],
   controllers: [AppController],
   providers: [
