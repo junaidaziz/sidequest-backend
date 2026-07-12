@@ -48,23 +48,21 @@ export class ProofService {
       throw new NotFoundException('Mission not found or inactive');
     }
 
-    const user = await this.prisma.user.findUnique({
+    const precheckUser = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: {
-        id: true,
-        isGuest: true,
-        currentStreak: true,
-        longestStreak: true,
-        lastCompletionDate: true,
-      },
+      select: { id: true, isGuest: true },
     });
-    if (!user) {
+    if (!precheckUser) {
       // Defensive: JwtStrategy already rejects tokens for deleted users.
       throw new NotFoundException('User not found');
     }
 
-    // Guest gate: one free completion, ever. Signed-in users are unlimited in v1.
-    if (user.isGuest) {
+    // Fast-path guest-gate check, before spending an S3 upload on a request
+    // that's obviously already over the limit. NOT the security boundary —
+    // see the FOR UPDATE-locked re-check inside the transaction below, which
+    // closes the race two concurrent requests would otherwise slip through
+    // (both reading count=0 here before either has committed a Completion).
+    if (precheckUser.isGuest) {
       const priorCompletions = await this.prisma.completion.count({ where: { userId } });
       if (priorCompletions >= 1) {
         throw new ForbiddenException(GUEST_LIMIT_REASON);
@@ -85,17 +83,42 @@ export class ProofService {
       proofType = ProofType.text;
     }
 
-    const streak = computeStreak({
-      now: new Date(),
-      lastCompletionDate: user.lastCompletionDate,
-      currentStreak: user.currentStreak,
-      longestStreak: user.longestStreak,
-    });
+    // Authoritative gate + ledger write, inside one transaction. `FOR UPDATE`
+    // locks the user row so a concurrent request from the same guest blocks
+    // here until this transaction commits (then re-reads the now-current
+    // completion count) — closing the race the fast-path check above cannot
+    // close by itself. Re-reading streak fields under the same lock also
+    // makes concurrent completions from the *same signed-in user* safe,
+    // which the old array-form $transaction did not guarantee either.
+    const { completion, updatedUser } = await this.prisma.$transaction(async (tx) => {
+      const [lockedUser] = await tx.$queryRaw<
+        {
+          id: string;
+          isGuest: boolean;
+          currentStreak: number;
+          longestStreak: number;
+          lastCompletionDate: Date | null;
+        }[]
+      >`SELECT id, "isGuest", "currentStreak", "longestStreak", "lastCompletionDate"
+        FROM users WHERE id = ${userId} FOR UPDATE`;
+      if (!lockedUser) {
+        throw new NotFoundException('User not found');
+      }
+      if (lockedUser.isGuest) {
+        const priorCompletions = await tx.completion.count({ where: { userId } });
+        if (priorCompletions >= 1) {
+          throw new ForbiddenException(GUEST_LIMIT_REASON);
+        }
+      }
 
-    // Financial-ledger-style write: the Completion and the XP/streak mutation
-    // must commit together or not at all.
-    const [completion, updatedUser] = await this.prisma.$transaction([
-      this.prisma.completion.create({
+      const streak = computeStreak({
+        now: new Date(),
+        lastCompletionDate: lockedUser.lastCompletionDate,
+        currentStreak: lockedUser.currentStreak,
+        longestStreak: lockedUser.longestStreak,
+      });
+
+      const createdCompletion = await tx.completion.create({
         data: {
           userId,
           missionId,
@@ -105,8 +128,8 @@ export class ProofService {
           xpAwarded: mission.xpReward,
         },
         select: { id: true, xpAwarded: true },
-      }),
-      this.prisma.user.update({
+      });
+      const newUserState = await tx.user.update({
         where: { id: userId },
         data: {
           totalXp: { increment: mission.xpReward },
@@ -115,8 +138,10 @@ export class ProofService {
           lastCompletionDate: streak.lastCompletionDate,
         },
         select: { totalXp: true, currentStreak: true, longestStreak: true },
-      }),
-    ]);
+      });
+
+      return { completion: createdCompletion, updatedUser: newUserState };
+    });
 
     const proofUrl =
       proofType === ProofType.photo && proofKey

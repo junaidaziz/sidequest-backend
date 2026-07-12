@@ -87,7 +87,7 @@ describe('Proof submission (e2e)', () => {
         .post(`/missions/${missionId}/proof`)
         .set('Authorization', `Bearer ${token}`)
         .attach('photo', pngBuffer, { filename: 'proof.png', contentType: 'image/png' })
-        .expect(200);
+        .expect(201);
 
       expect(res.body).toMatchObject({
         missionTitle,
@@ -123,7 +123,7 @@ describe('Proof submission (e2e)', () => {
         .post(`/missions/${missionId}/proof`)
         .set('Authorization', `Bearer ${token}`)
         .field('caption', 'Found the oldest building on the street!')
-        .expect(200);
+        .expect(201);
 
       expect(res.body.proofUrl).toBeNull();
       expect(res.body.xpAwarded).toBe(40);
@@ -143,7 +143,7 @@ describe('Proof submission (e2e)', () => {
         .post(`/missions/${missionId}/proof`)
         .set('Authorization', `Bearer ${token}`)
         .field('caption', 'First completion')
-        .expect(200);
+        .expect(201);
 
       const res = await request(app.getHttpServer())
         .post(`/missions/${missionId}/proof`)
