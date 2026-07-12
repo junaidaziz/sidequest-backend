@@ -31,6 +31,7 @@ describe('MissionPoolService', () => {
   let findMany: jest.Mock;
   let redisGet: jest.Mock;
   let redisSet: jest.Mock;
+  let redisDel: jest.Mock;
   const ORIGINAL_ENV = process.env;
 
   async function buildService(): Promise<MissionPoolService> {
@@ -38,7 +39,7 @@ describe('MissionPoolService', () => {
       providers: [
         MissionPoolService,
         { provide: PrismaService, useValue: { mission: { findMany } } },
-        { provide: RedisService, useValue: { get: redisGet, set: redisSet } },
+        { provide: RedisService, useValue: { get: redisGet, set: redisSet, del: redisDel } },
       ],
     }).compile();
     return module.get(MissionPoolService);
@@ -48,6 +49,7 @@ describe('MissionPoolService', () => {
     findMany = jest.fn();
     redisGet = jest.fn();
     redisSet = jest.fn();
+    redisDel = jest.fn();
     process.env = { ...ORIGINAL_ENV };
     delete process.env.MISSION_POOL_CACHE_TTL_SECONDS;
   });
@@ -146,5 +148,23 @@ describe('MissionPoolService', () => {
     const service = await buildService();
 
     await expect(service.getActivePool()).resolves.toEqual(pool);
+  });
+
+  describe('invalidate', () => {
+    it('deletes the cache key', async () => {
+      redisDel.mockResolvedValue(1);
+      const service = await buildService();
+
+      await service.invalidate();
+
+      expect(redisDel).toHaveBeenCalledWith('missions:active-pool');
+    });
+
+    it('does not throw when the cache delete fails', async () => {
+      redisDel.mockRejectedValue(new Error('connection refused'));
+      const service = await buildService();
+
+      await expect(service.invalidate()).resolves.toBeUndefined();
+    });
   });
 });

@@ -4,6 +4,7 @@ import request from 'supertest';
 import { AppModule } from './../src/app.module';
 import { AllExceptionsFilter } from './../src/common/filters/all-exceptions.filter';
 import { PrismaService } from './../src/prisma/prisma.service';
+import { MissionPoolService } from './../src/missions/mission-pool.service';
 
 /**
  * Runs against the local dev database (via docker-compose). Seeds two missions
@@ -18,6 +19,7 @@ import { PrismaService } from './../src/prisma/prisma.service';
 describe('Home (e2e)', () => {
   let app: INestApplication;
   let prisma: PrismaService;
+  let missionPool: MissionPoolService;
 
   const stamp = Date.now();
   const titleA = `E2E Home Save A ${stamp}`;
@@ -42,6 +44,7 @@ describe('Home (e2e)', () => {
     );
     app.useGlobalFilters(new AllExceptionsFilter());
     prisma = app.get(PrismaService);
+    missionPool = app.get(MissionPoolService);
     await app.init();
 
     const base = {
@@ -62,6 +65,9 @@ describe('Home (e2e)', () => {
     await prisma.mission.create({
       data: { ...base, title: titleB, crewTags: ['Solo'], settingTags: ['Outdoors'] },
     });
+    // A previous e2e file may still have a warm cache entry that predates
+    // these fixtures — force the next read to see them.
+    await missionPool.invalidate();
   });
 
   afterAll(async () => {
@@ -76,6 +82,8 @@ describe('Home (e2e)', () => {
       await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
     }
     await prisma.mission.deleteMany({ where: { title: { in: seededTitles } } });
+    // Don't leave these now-deleted fixtures cached for the next e2e file.
+    await missionPool.invalidate();
     await app.close();
   });
 

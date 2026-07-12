@@ -1,0 +1,100 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  DATABASE_URL: postgresql://sidequest:sidequest@localhost:5432/sidequest?schema=public
+  REDIS_URL: redis://localhost:6379
+  JWT_SECRET: ci-test-secret-not-for-production
+  JWT_ACCESS_TOKEN_TTL: 15m
+  JWT_REFRESH_TOKEN_TTL: 30d
+  GUEST_TOKEN_TTL: 90d
+  THROTTLE_TTL: 60000
+  THROTTLE_LIMIT: 100
+  S3_ENDPOINT: http://localhost:4566
+  S3_FORCE_PATH_STYLE: 'true'
+  S3_REGION: us-east-1
+  S3_BUCKET: sidequest-proofs-dev
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: sidequest
+          POSTGRES_PASSWORD: sidequest
+          POSTGRES_DB: sidequest
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U sidequest"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      localstack:
+        image: localstack/localstack:3
+        env:
+          SERVICES: s3
+          DEFAULT_REGION: us-east-1
+        ports: ['4566:4566']
+        options: >-
+          --health-cmd "curl -sf http://localhost:4566/_localstack/health"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prisma generate
+        run: npx prisma generate
+
+      - name: Run migrations
+        run: npx prisma migrate deploy
+
+      - name: Create the S3 bucket in LocalStack
+        run: |
+          pip install --quiet "awscli-local==0.22.2"
+          awslocal s3 mb s3://sidequest-proofs-dev
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint:check
+
+      - name: Unit tests (with coverage gate)
+        run: npm test -- --coverage
+
+      - name: e2e tests
+        run: npm run test:e2e

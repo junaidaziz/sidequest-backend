@@ -68,6 +68,22 @@ export class MissionPoolService {
     return missions;
   }
 
+  /**
+   * Forces the next getActivePool() call to re-read Postgres. No production
+   * caller exists yet (missions are only ever manually seeded today, never
+   * mutated through the running API) — this exists for e2e tests, which
+   * create/delete fixture missions directly via Prisma and need the very
+   * next read to see that change rather than a still-warm cache entry left
+   * by a previous test file sharing the same Redis instance.
+   */
+  async invalidate(): Promise<void> {
+    try {
+      await this.redis.del(CACHE_KEY);
+    } catch (error) {
+      this.logger.warn(`Cache invalidation failed: ${(error as Error).message}`);
+    }
+  }
+
   private async readCache(): Promise<Mission[] | null> {
     try {
       const raw = await this.redis.get(CACHE_KEY);
