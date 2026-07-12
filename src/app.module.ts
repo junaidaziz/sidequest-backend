@@ -7,6 +7,8 @@ import { AppService } from './app.service';
 import { PrismaModule } from './prisma/prisma.module';
 import { AuthModule } from './auth/auth.module';
 import { MissionsModule } from './missions/missions.module';
+import { StorageModule } from './storage/storage.module';
+import { ProofModule } from './proof/proof.module';
 
 @Module({
   imports: [
@@ -20,6 +22,8 @@ import { MissionsModule } from './missions/missions.module';
     ]),
     AuthModule,
     MissionsModule,
+    StorageModule,
+    ProofModule,
   ],
   controllers: [AppController],
   providers: [
