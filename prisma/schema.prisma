@@ -25,3 +25,50 @@ model User {
 
   @@map("users")
 }
+
+enum MissionCategory {
+  explore
+  create
+  discover
+}
+
+enum MissionDifficulty {
+  Easy
+  Medium
+  Hard
+}
+
+/// Curated mission pool for the rules-filter generator. `crewTags` and
+/// `settingTags` are the vocab OnboardingScreen already collects — a mission
+/// matches a request when the requested crew/setting is in these lists (or
+/// the requester said "Anywhere" for setting). `estimatedMinutes` and
+/// `costTier` are matched as upper bounds against the requester's time/budget
+/// selection, so e.g. someone with a 1-hour budget also sees 15/30-min quests.
+model Mission {
+  id                String            @id @default(uuid())
+  title             String            @unique
+  category          MissionCategory
+  /// Short teaser shown on the results card (2-line clamp in the UI).
+  description       String
+  /// Full brief shown inside the detail sheet.
+  fullBrief         String
+  proofRequirement  String
+  estimatedMinutes  Int
+  xpReward          Int
+  difficulty        MissionDifficulty
+  /// 1-3, filled difficulty dots shown in the UI — derived from difficulty
+  /// but stored explicitly so content authors can fine-tune without a code change.
+  difficultyDots    Int
+  /// Onboarding crew values this mission suits, e.g. ["Solo", "Partner"].
+  crewTags          String[]
+  /// Onboarding setting values this mission suits, e.g. ["Outdoors", "Nature"].
+  settingTags       String[]
+  /// 0=Free, 1=Under $10, 2=Under $30, 3=No limit — the mission's own cost ceiling.
+  costTier          Int
+  isActive          Boolean           @default(true)
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+  deletedAt         DateTime?
+
+  @@map("missions")
+}
