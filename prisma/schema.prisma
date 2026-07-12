@@ -103,6 +103,9 @@ model SavedMission {
   missionId String
   mission   Mission  @relation(fields: [missionId], references: [id])
   savedAt   DateTime @default(now())
+  /// Rows are effectively immutable (created on save, deleted on unsave, never
+  /// modified) — kept anyway per the project's audit-field convention.
+  updatedAt DateTime @updatedAt
 
   @@unique([userId, missionId])
   @@index([userId])

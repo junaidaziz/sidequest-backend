@@ -58,6 +58,7 @@ export class MissionsController {
   @ApiParam({ name: 'missionId', format: 'uuid' })
   @ApiOperation({ summary: 'Save (bookmark) a mission for the current user — idempotent' })
   @ApiResponse({ status: 200, type: SaveMissionResponseDto })
+  @ApiResponse({ status: 400, description: 'missionId is not a valid UUID' })
   @ApiResponse({ status: 401, description: 'Missing or invalid access token' })
   @ApiResponse({ status: 404, description: 'Mission not found or inactive' })
   saveMission(
@@ -79,6 +80,7 @@ export class MissionsController {
   @ApiParam({ name: 'missionId', format: 'uuid' })
   @ApiOperation({ summary: 'Unsave (remove bookmark) a mission for the current user — idempotent' })
   @ApiResponse({ status: 200, type: SaveMissionResponseDto })
+  @ApiResponse({ status: 400, description: 'missionId is not a valid UUID' })
   @ApiResponse({ status: 401, description: 'Missing or invalid access token' })
   unsaveMission(
     @CurrentUser() user: AuthUser,
