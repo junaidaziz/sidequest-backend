@@ -10,6 +10,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AuthUser } from '../auth/types/jwt-payload.interface';
@@ -17,6 +18,10 @@ import { GenerateMissionsDto } from './dto/generate-missions.dto';
 import { GenerateMissionsResponseDto } from './dto/mission-response.dto';
 import { SaveMissionResponseDto } from './dto/save-mission-response.dto';
 import { MissionsService } from './missions.service';
+
+/** Unauthenticated and hit on every context-selection screen — tighter than
+ * the global 100/60s default, generous enough for legitimate shuffle taps. */
+const GENERATE_THROTTLE = { default: { limit: 30, ttl: 60_000 } } as const;
 
 @ApiTags('missions')
 @Controller('missions')
@@ -26,9 +31,9 @@ export class MissionsController {
   /**
    * Public by design: this is the first API call the app makes after context
    * selection, before any account or guest session exists — so no JwtAuthGuard.
-   * The global throttler default applies.
    */
   @Post('generate')
+  @Throttle(GENERATE_THROTTLE)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Generate up to 3 random missions matching the onboarding context',
@@ -61,6 +66,7 @@ export class MissionsController {
   @ApiResponse({ status: 400, description: 'missionId is not a valid UUID' })
   @ApiResponse({ status: 401, description: 'Missing or invalid access token' })
   @ApiResponse({ status: 404, description: 'Mission not found or inactive' })
+  @ApiResponse({ status: 429, description: 'Too many requests' })
   saveMission(
     @CurrentUser() user: AuthUser,
     @Param('missionId', ParseUUIDPipe) missionId: string,
@@ -82,6 +88,7 @@ export class MissionsController {
   @ApiResponse({ status: 200, type: SaveMissionResponseDto })
   @ApiResponse({ status: 400, description: 'missionId is not a valid UUID' })
   @ApiResponse({ status: 401, description: 'Missing or invalid access token' })
+  @ApiResponse({ status: 429, description: 'Too many requests' })
   unsaveMission(
     @CurrentUser() user: AuthUser,
     @Param('missionId', ParseUUIDPipe) missionId: string,
