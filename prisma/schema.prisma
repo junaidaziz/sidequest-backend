@@ -14,6 +14,9 @@ model User {
   id           String    @id @default(uuid())
   email        String?   @unique
   passwordHash String?
+  /// bcrypt hash of the SHA-256 digest of the user's current refresh token.
+  /// Used for refresh-token rotation; never stores the raw token.
+  refreshTokenHash String?
   displayName  String?
   isGuest      Boolean   @default(true)
   createdAt    DateTime  @default(now())
