@@ -19,9 +19,24 @@ model User {
   refreshTokenHash String?
   displayName  String?
   isGuest      Boolean   @default(true)
+  /// Simple flat XP rules: totalXp is the sum of each completed mission's
+  /// xpReward, no multipliers. Level is derived at read time from totalXp
+  /// (not stored) so the level-per-XP curve can change without a migration.
+  totalXp      Int       @default(0)
+  /// Consecutive UTC calendar days with >=1 completion. Simplification: uses
+  /// UTC rather than the user's local timezone (true per-user local-day
+  /// streaks would need the client to report its local date) — acceptable
+  /// for v1, revisit if users near the UTC day boundary report a jarring reset.
+  currentStreak      Int       @default(0)
+  longestStreak      Int       @default(0)
+  /// UTC calendar date (midnight-normalized) of the last completion, used to
+  /// compute whether a new completion extends, resets, or no-ops the streak.
+  lastCompletionDate DateTime?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
   deletedAt    DateTime?
+
+  completions  Completion[]
 
   @@map("users")
 }
@@ -70,5 +85,34 @@ model Mission {
   updatedAt         DateTime          @updatedAt
   deletedAt         DateTime?
 
+  completions       Completion[]
+
   @@map("missions")
+}
+
+enum ProofType {
+  photo
+  text
+}
+
+/// A single completed mission, with its proof and the XP it awarded. The
+/// guest-completion gate ("one free mission with no account") is enforced by
+/// counting a guest user's rows here, not by a separate flag — so the count
+/// stays correct even across the guest->account upgrade-in-place on signup.
+model Completion {
+  id          String    @id @default(uuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id])
+  missionId   String
+  mission     Mission   @relation(fields: [missionId], references: [id])
+  proofType   ProofType
+  /// S3 object key (not a full URL — the key is resolved to a URL/presigned
+  /// GET at read time so the bucket/CDN can change without touching rows).
+  proofKey    String?
+  proofText   String?
+  xpAwarded   Int
+  completedAt DateTime  @default(now())
+
+  @@index([userId])
+  @@map("completions")
 }
