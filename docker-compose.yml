@@ -19,6 +19,21 @@ services:
     volumes:
       - sidequest-redis:/data
 
+  # S3-compatible mock for local dev/test. The app talks to it through the
+  # same AWS SDK client used against real S3 in production — only the
+  # endpoint/credentials env vars differ. See .env.example.
+  localstack:
+    image: localstack/localstack:3
+    restart: unless-stopped
+    environment:
+      SERVICES: s3
+      DEFAULT_REGION: us-east-1
+    ports:
+      - '4566:4566'
+    volumes:
+      - sidequest-localstack:/var/lib/localstack
+
 volumes:
   sidequest-postgres:
   sidequest-redis:
+  sidequest-localstack:
