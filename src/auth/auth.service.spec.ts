@@ -106,7 +106,12 @@ describe('AuthService', () => {
         }),
       });
       expect(prisma.user.update).not.toHaveBeenCalled();
-      expect(result).toEqual({ accessToken: 'access-token', refreshToken: 'refresh-token' });
+      // Profile comes from create()'s own return value — no extra read.
+      expect(result).toEqual({
+        accessToken: 'access-token',
+        refreshToken: 'refresh-token',
+        user: { id: 'user-1', email: null, displayName: 'Ada', isGuest: true },
+      });
     });
 
     it('signs the guest refresh token with the guest TTL', async () => {
@@ -298,7 +303,11 @@ describe('AuthService', () => {
 
       const result = await service.login({ email: 'ada@example.com', password: 'password123' });
 
-      expect(result).toEqual({ accessToken: 'access-token', refreshToken: 'refresh-token' });
+      expect(result).toEqual({
+        accessToken: 'access-token',
+        refreshToken: 'refresh-token',
+        user: { id: 'user-1', email: 'ada@example.com', displayName: 'Ada', isGuest: false },
+      });
     });
 
     it('throws UnauthorizedException when the user does not exist', async () => {
@@ -374,7 +383,11 @@ describe('AuthService', () => {
 
       const result = await service.refresh({ refreshToken: 'valid.refresh.token' });
 
-      expect(result).toEqual({ accessToken: 'access-token', refreshToken: 'refresh-token' });
+      expect(result).toEqual({
+        accessToken: 'access-token',
+        refreshToken: 'refresh-token',
+        user: { id: 'user-1', email: 'ada@example.com', displayName: 'Ada', isGuest: false },
+      });
       expect(prisma.user.update).toHaveBeenCalled();
     });
 

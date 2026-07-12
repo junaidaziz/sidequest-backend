@@ -12,7 +12,7 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagg
 import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { CurrentUser } from './decorators/current-user.decorator';
-import { AuthTokensDto } from './dto/auth-tokens.dto';
+import { AuthResponseDto } from './dto/auth-response.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { SignupDto } from './dto/signup.dto';
@@ -31,8 +31,8 @@ export class AuthController {
   @Post('guest')
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({ summary: 'Bootstrap an anonymous guest session' })
-  @ApiResponse({ status: 201, type: AuthTokensDto })
-  createGuest(): Promise<AuthTokensDto> {
+  @ApiResponse({ status: 201, type: AuthResponseDto })
+  createGuest(): Promise<AuthResponseDto> {
     return this.authService.createGuest();
   }
 
@@ -42,14 +42,14 @@ export class AuthController {
   @ApiOperation({
     summary: 'Register a full account (upgrades a guest in place if bearer is a guest token)',
   })
-  @ApiResponse({ status: 201, type: AuthTokensDto })
+  @ApiResponse({ status: 201, type: AuthResponseDto })
   @ApiResponse({ status: 400, description: 'Validation failed' })
   @ApiResponse({ status: 409, description: 'Email already registered' })
   @ApiResponse({ status: 429, description: 'Too many requests' })
   signup(
     @Body() dto: SignupDto,
     @Headers('authorization') authorization?: string,
-  ): Promise<AuthTokensDto> {
+  ): Promise<AuthResponseDto> {
     return this.authService.signup(dto, authorization);
   }
 
@@ -57,21 +57,21 @@ export class AuthController {
   @Throttle(SENSITIVE_THROTTLE)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Authenticate with email and password' })
-  @ApiResponse({ status: 200, type: AuthTokensDto })
+  @ApiResponse({ status: 200, type: AuthResponseDto })
   @ApiResponse({ status: 400, description: 'Validation failed' })
   @ApiResponse({ status: 401, description: 'Invalid credentials' })
   @ApiResponse({ status: 429, description: 'Too many requests' })
-  login(@Body() dto: LoginDto): Promise<AuthTokensDto> {
+  login(@Body() dto: LoginDto): Promise<AuthResponseDto> {
     return this.authService.login(dto);
   }
 
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Exchange a refresh token for a rotated token pair' })
-  @ApiResponse({ status: 200, type: AuthTokensDto })
+  @ApiResponse({ status: 200, type: AuthResponseDto })
   @ApiResponse({ status: 400, description: 'Validation failed' })
   @ApiResponse({ status: 401, description: 'Invalid refresh token' })
-  refresh(@Body() dto: RefreshTokenDto): Promise<AuthTokensDto> {
+  refresh(@Body() dto: RefreshTokenDto): Promise<AuthResponseDto> {
     return this.authService.refresh(dto);
   }
 

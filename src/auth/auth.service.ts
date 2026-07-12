@@ -5,6 +5,7 @@ import { Prisma, User } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { createHash, randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import { AuthResponseDto } from './dto/auth-response.dto';
 import { AuthTokensDto } from './dto/auth-tokens.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
@@ -50,12 +51,13 @@ export class AuthService {
   }
 
   /** Bootstraps an anonymous session: a credential-less guest User + token pair. */
-  async createGuest(): Promise<AuthTokensDto> {
+  async createGuest(): Promise<AuthResponseDto> {
     const id = randomUUID();
     const { accessToken, refreshToken, refreshTokenHash } = await this.buildTokenSet(id, true);
-    await this.prisma.user.create({ data: { id, isGuest: true, refreshTokenHash } });
+    // create() returns the written row — no separate read needed for the profile.
+    const user = await this.prisma.user.create({ data: { id, isGuest: true, refreshTokenHash } });
     this.logger.log(`Guest session created: ${id}`);
-    return { accessToken, refreshToken };
+    return { accessToken, refreshToken, user: this.toProfile(user) };
   }
 
   /**
@@ -63,7 +65,7 @@ export class AuthService {
    * guest's existing row is upgraded in place so mission/XP history is preserved;
    * otherwise a fresh account row is created.
    */
-  async signup(dto: SignupDto, bearerToken?: string): Promise<AuthTokensDto> {
+  async signup(dto: SignupDto, bearerToken?: string): Promise<AuthResponseDto> {
     const existing = await this.prisma.user.findUnique({
       where: { email: dto.email },
     });
@@ -84,7 +86,7 @@ export class AuthService {
             guest.id,
             false,
           );
-          await this.prisma.user.update({
+          const upgraded = await this.prisma.user.update({
             where: { id: guest.id },
             data: {
               email: dto.email,
@@ -95,13 +97,13 @@ export class AuthService {
             },
           });
           this.logger.log(`Guest ${guest.id} upgraded to full account`);
-          return { accessToken, refreshToken };
+          return { accessToken, refreshToken, user: this.toProfile(upgraded) };
         }
       }
 
       const id = randomUUID();
       const { accessToken, refreshToken, refreshTokenHash } = await this.buildTokenSet(id, false);
-      await this.prisma.user.create({
+      const created = await this.prisma.user.create({
         data: {
           id,
           email: dto.email,
@@ -112,7 +114,7 @@ export class AuthService {
         },
       });
       this.logger.log(`New account created: ${id}`);
-      return { accessToken, refreshToken };
+      return { accessToken, refreshToken, user: this.toProfile(created) };
     } catch (error) {
       // Backstop for the race between the uniqueness pre-check and the write:
       // a concurrent signup on the same email must still surface as 409, not 500.
@@ -124,7 +126,7 @@ export class AuthService {
   }
 
   /** Authenticates by email + password. Same generic error for every failure. */
-  async login(dto: LoginDto): Promise<AuthTokensDto> {
+  async login(dto: LoginDto): Promise<AuthResponseDto> {
     const user = await this.prisma.user.findUnique({
       where: { email: dto.email },
     });
@@ -140,11 +142,12 @@ export class AuthService {
       throw new UnauthorizedException(GENERIC_AUTH_ERROR);
     }
 
-    return this.persistTokens(user.id, user.isGuest);
+    const tokens = await this.persistTokens(user.id, user.isGuest);
+    return { ...tokens, user: this.toProfile(user) };
   }
 
   /** Exchanges a valid refresh token for a new pair and rotates the stored hash. */
-  async refresh(dto: RefreshTokenDto): Promise<AuthTokensDto> {
+  async refresh(dto: RefreshTokenDto): Promise<AuthResponseDto> {
     let payload: JwtPayload;
     try {
       payload = await this.jwtService.verifyAsync<JwtPayload>(dto.refreshToken, {
@@ -170,7 +173,8 @@ export class AuthService {
       throw new UnauthorizedException(INVALID_REFRESH_ERROR);
     }
 
-    return this.persistTokens(user.id, user.isGuest);
+    const tokens = await this.persistTokens(user.id, user.isGuest);
+    return { ...tokens, user: this.toProfile(user) };
   }
 
   /** Returns the public-safe profile of the authenticated user. */
