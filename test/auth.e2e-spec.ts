@@ -6,13 +6,9 @@ import { AllExceptionsFilter } from './../src/common/filters/all-exceptions.filt
 import { PrismaService } from './../src/prisma/prisma.service';
 
 /**
- * TODO(test-infra): these e2e tests require:
- *   1. The `add_user_refresh_token_hash` migration applied to the target DB:
- *        npx prisma migrate dev --name add_user_refresh_token_hash
- *   2. A dedicated TEST database (do not run against the dev/shared DB). Point
- *      DATABASE_URL at a throwaway schema before running `npm run test:e2e`.
- * They mirror the project's existing app.e2e-spec.ts bootstrap (real AppModule +
- * Supertest) and clean up the users they create in afterAll.
+ * Runs against the local dev database (via docker-compose) for now, cleaning
+ * up the users it creates in afterAll. TODO(test-infra): move to a dedicated
+ * throwaway test database/schema once one exists — see backend/CLAUDE.md.
  */
 describe('Auth (e2e)', () => {
   let app: INestApplication;
@@ -39,21 +35,29 @@ describe('Auth (e2e)', () => {
   });
 
   describe('POST /auth/guest', () => {
-    it('returns a token pair with no auth', async () => {
+    it('returns a token pair and guest profile with no auth', async () => {
       const res = await request(app.getHttpServer()).post('/auth/guest').expect(201);
       expect(res.body).toHaveProperty('accessToken');
       expect(res.body).toHaveProperty('refreshToken');
+      // The mobile client persists tokens and session state from this single
+      // response — a missing `user` here breaks hydration silently.
+      expect(res.body.user).toMatchObject({ email: null, isGuest: true });
     });
   });
 
   describe('POST /auth/signup', () => {
-    it('creates a full account and returns tokens', async () => {
+    it('creates a full account and returns tokens plus the account profile', async () => {
       const res = await request(app.getHttpServer())
         .post('/auth/signup')
         .send({ email: createdEmail, password: 'password123', displayName: 'E2E' })
         .expect(201);
       expect(res.body).toHaveProperty('accessToken');
       expect(res.body).toHaveProperty('refreshToken');
+      expect(res.body.user).toMatchObject({
+        email: createdEmail,
+        displayName: 'E2E',
+        isGuest: false,
+      });
     });
 
     it('rejects a duplicate email with 409', async () => {
@@ -72,12 +76,13 @@ describe('Auth (e2e)', () => {
   });
 
   describe('POST /auth/login', () => {
-    it('authenticates valid credentials', async () => {
+    it('authenticates valid credentials and returns the account profile', async () => {
       const res = await request(app.getHttpServer())
         .post('/auth/login')
         .send({ email: createdEmail, password: 'password123' })
         .expect(200);
       expect(res.body).toHaveProperty('accessToken');
+      expect(res.body.user).toMatchObject({ email: createdEmail, isGuest: false });
     });
 
     it('returns 401 on wrong password without leaking existence', async () => {
@@ -131,6 +136,7 @@ describe('Auth (e2e)', () => {
 
       expect(res.body).toHaveProperty('accessToken');
       expect(res.body).toHaveProperty('refreshToken');
+      expect(res.body.user).toMatchObject({ email: createdEmail, isGuest: false });
     });
 
     it('returns 401 for a structurally-invalid token', async () => {
