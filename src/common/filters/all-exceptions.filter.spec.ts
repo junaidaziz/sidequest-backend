@@ -6,6 +6,7 @@ import {
   InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
+import { MulterError } from 'multer';
 import { AllExceptionsFilter } from './all-exceptions.filter';
 
 interface CapturedResponse {
@@ -89,5 +90,25 @@ describe('AllExceptionsFilter', () => {
 
     expect(captured.statusCode).toBe(HttpStatus.INTERNAL_SERVER_ERROR);
     expect(captured.body?.message).toBeDefined();
+  });
+
+  it('maps a Multer file-size-limit error to 413, not the generic 500', () => {
+    const captured: CapturedResponse = { statusCode: 0, body: null };
+    const logSpy = jest.spyOn(filter['logger'], 'error');
+
+    filter.catch(new MulterError('LIMIT_FILE_SIZE'), buildHost(captured));
+
+    expect(captured.statusCode).toBe(HttpStatus.PAYLOAD_TOO_LARGE);
+    expect(captured.body).toMatchObject({ message: 'File too large' });
+    // Not a server error — must not be logged as one.
+    expect(logSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not treat a non-size Multer error as payload-too-large', () => {
+    const captured: CapturedResponse = { statusCode: 0, body: null };
+
+    filter.catch(new MulterError('LIMIT_UNEXPECTED_FILE'), buildHost(captured));
+
+    expect(captured.statusCode).toBe(HttpStatus.INTERNAL_SERVER_ERROR);
   });
 });
