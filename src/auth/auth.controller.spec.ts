@@ -17,6 +17,7 @@ describe('AuthController', () => {
     refresh: jest.Mock;
     logout: jest.Mock;
     getProfile: jest.Mock;
+    updateDisplayName: jest.Mock;
   };
 
   beforeEach(async () => {
@@ -28,6 +29,7 @@ describe('AuthController', () => {
       refresh: jest.fn().mockResolvedValue(TOKENS),
       logout: jest.fn().mockResolvedValue({ success: true }),
       getProfile: jest.fn(),
+      updateDisplayName: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -127,6 +129,7 @@ describe('AuthController', () => {
       email: 'ada@example.com',
       displayName: 'Ada',
       isGuest: false,
+      avatarUrl: null,
     };
     service.getProfile.mockResolvedValue(profile);
     const user: AuthUser = { userId: 'user-1', email: 'ada@example.com', isGuest: false };
@@ -134,6 +137,23 @@ describe('AuthController', () => {
     const result = await controller.me(user);
 
     expect(service.getProfile).toHaveBeenCalledWith('user-1');
+    expect(result).toEqual(profile);
+  });
+
+  it('PATCH /auth/me forwards the new display name and returns the updated profile', async () => {
+    const profile: UserProfileDto = {
+      id: 'user-1',
+      email: 'ada@example.com',
+      displayName: 'New Name',
+      isGuest: false,
+      avatarUrl: null,
+    };
+    service.updateDisplayName.mockResolvedValue(profile);
+    const user: AuthUser = { userId: 'user-1', email: 'ada@example.com', isGuest: false };
+
+    const result = await controller.updateMe(user, { displayName: 'New Name' });
+
+    expect(service.updateDisplayName).toHaveBeenCalledWith('user-1', 'New Name');
     expect(result).toEqual(profile);
   });
 });

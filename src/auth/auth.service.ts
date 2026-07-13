@@ -6,6 +6,7 @@ import * as bcrypt from 'bcrypt';
 import { createHash, randomUUID } from 'crypto';
 import { OAuth2Client } from 'google-auth-library';
 import { PrismaService } from '../prisma/prisma.service';
+import { StorageService } from '../storage/storage.service';
 import { AuthResponseDto } from './dto/auth-response.dto';
 import { AuthTokensDto } from './dto/auth-tokens.dto';
 import { GoogleAuthDto } from './dto/google-auth.dto';
@@ -60,6 +61,7 @@ export class AuthService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
+    private readonly storage: StorageService,
     config: ConfigService,
   ) {
     this.jwtSecret = config.getOrThrow<string>('JWT_SECRET');
@@ -77,7 +79,7 @@ export class AuthService {
     // create() returns the written row — no separate read needed for the profile.
     const user = await this.prisma.user.create({ data: { id, isGuest: true, refreshTokenHash } });
     this.logger.log(`Guest session created: ${id}`);
-    return { accessToken, refreshToken, user: this.toProfile(user) };
+    return { accessToken, refreshToken, user: await this.toProfile(user) };
   }
 
   /**
@@ -117,7 +119,7 @@ export class AuthService {
             },
           });
           this.logger.log(`Guest ${guest.id} upgraded to full account`);
-          return { accessToken, refreshToken, user: this.toProfile(upgraded) };
+          return { accessToken, refreshToken, user: await this.toProfile(upgraded) };
         }
       }
 
@@ -134,7 +136,7 @@ export class AuthService {
         },
       });
       this.logger.log(`New account created: ${id}`);
-      return { accessToken, refreshToken, user: this.toProfile(created) };
+      return { accessToken, refreshToken, user: await this.toProfile(created) };
     } catch (error) {
       // Backstop for the race between the uniqueness pre-check and the write:
       // a concurrent signup on the same email must still surface as 409, not 500.
@@ -166,7 +168,7 @@ export class AuthService {
     const byGoogleId = await this.prisma.user.findUnique({ where: { googleId: sub } });
     if (byGoogleId && !byGoogleId.deletedAt) {
       const tokens = await this.persistTokens(byGoogleId.id, byGoogleId.isGuest);
-      return { ...tokens, user: this.toProfile(byGoogleId) };
+      return { ...tokens, user: await this.toProfile(byGoogleId) };
     }
 
     try {
@@ -194,7 +196,7 @@ export class AuthService {
           },
         });
         this.logger.log(`Existing account ${linked.id} linked to Google`);
-        return { accessToken, refreshToken, user: this.toProfile(linked) };
+        return { accessToken, refreshToken, user: await this.toProfile(linked) };
       }
 
       // 3. Guest upgrade in place — mirrors signup()'s guest branch so mission/XP
@@ -218,7 +220,7 @@ export class AuthService {
             },
           });
           this.logger.log(`Guest ${guest.id} upgraded to full account via Google`);
-          return { accessToken, refreshToken, user: this.toProfile(upgraded) };
+          return { accessToken, refreshToken, user: await this.toProfile(upgraded) };
         }
       }
 
@@ -237,7 +239,7 @@ export class AuthService {
         },
       });
       this.logger.log(`New account created via Google: ${id}`);
-      return { accessToken, refreshToken, user: this.toProfile(created) };
+      return { accessToken, refreshToken, user: await this.toProfile(created) };
     } catch (error) {
       // Backstop for the race between the read-checks above and the write: a
       // concurrent Google sign-in on the same email should look like "try
@@ -268,7 +270,7 @@ export class AuthService {
     }
 
     const tokens = await this.persistTokens(user.id, user.isGuest);
-    return { ...tokens, user: this.toProfile(user) };
+    return { ...tokens, user: await this.toProfile(user) };
   }
 
   /** Exchanges a valid refresh token for a new pair and rotates the stored hash. */
@@ -299,7 +301,7 @@ export class AuthService {
     }
 
     const tokens = await this.persistTokens(user.id, user.isGuest);
-    return { ...tokens, user: this.toProfile(user) };
+    return { ...tokens, user: await this.toProfile(user) };
   }
 
   /**
@@ -328,6 +330,21 @@ export class AuthService {
       throw new UnauthorizedException('User not found');
     }
     return this.toProfile(user);
+  }
+
+  /**
+   * Updates the authenticated user's display name and returns the refreshed
+   * profile. The caller is already authenticated (JwtAuthGuard + JwtStrategy
+   * confirmed the row exists and is not soft-deleted), so a plain update mirrors
+   * logout()'s trust model rather than re-reading first.
+   */
+  async updateDisplayName(userId: string, displayName: string): Promise<UserProfileDto> {
+    const updated = await this.prisma.user.update({
+      where: { id: userId },
+      data: { displayName },
+    });
+    this.logger.log(`Display name updated for user ${userId}`);
+    return this.toProfile(updated);
   }
 
   /**
@@ -453,12 +470,20 @@ export class AuthService {
     return createHash('sha256').update(token).digest('hex');
   }
 
-  private toProfile(user: User): UserProfileDto {
+  /**
+   * Projects a User row to the public-safe profile, resolving `avatarUrl` from a
+   * stored S3 object key to a short-lived presigned GET URL (null when unset) —
+   * the same read-time-resolution convention ProofService uses for `proofUrl`,
+   * so the raw key is never exposed. Async because the presign is an I/O call;
+   * every call site awaits it.
+   */
+  private async toProfile(user: User): Promise<UserProfileDto> {
     return {
       id: user.id,
       email: user.email,
       displayName: user.displayName,
       isGuest: user.isGuest,
+      avatarUrl: user.avatarUrl ? await this.storage.getSignedDownloadUrl(user.avatarUrl) : null,
     };
   }
 }

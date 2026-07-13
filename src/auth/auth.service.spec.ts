@@ -6,6 +6,7 @@ import { Prisma, User } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { OAuth2Client } from 'google-auth-library';
 import { PrismaService } from '../prisma/prisma.service';
+import { StorageService } from '../storage/storage.service';
 import { AuthService } from './auth.service';
 import { TokenType } from './types/jwt-payload.interface';
 
@@ -80,6 +81,7 @@ describe('AuthService', () => {
     verify: jest.Mock;
     verifyAsync: jest.Mock;
   };
+  let storage: { getSignedDownloadUrl: jest.Mock };
 
   beforeEach(async () => {
     bcryptHash.mockReset().mockResolvedValue('bcrypt-hash');
@@ -100,12 +102,16 @@ describe('AuthService', () => {
       verify: jest.fn(),
       verifyAsync: jest.fn(),
     };
+    storage = {
+      getSignedDownloadUrl: jest.fn().mockResolvedValue('https://signed.example/avatar'),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AuthService,
         { provide: PrismaService, useValue: prisma },
         { provide: JwtService, useValue: jwtService },
+        { provide: StorageService, useValue: storage },
         {
           provide: ConfigService,
           useValue: { getOrThrow: (key: string): string => CONFIG[key] },
@@ -139,7 +145,7 @@ describe('AuthService', () => {
       expect(result).toEqual({
         accessToken: 'access-token',
         refreshToken: 'refresh-token',
-        user: { id: 'user-1', email: null, displayName: 'Ada', isGuest: true },
+        user: { id: 'user-1', email: null, displayName: 'Ada', isGuest: true, avatarUrl: null },
       });
     });
 
@@ -406,7 +412,13 @@ describe('AuthService', () => {
       expect(result).toEqual({
         accessToken: 'access-token',
         refreshToken: 'refresh-token',
-        user: { id: 'gu-1', email: 'ada@example.com', displayName: 'Ada', isGuest: false },
+        user: {
+          id: 'gu-1',
+          email: 'ada@example.com',
+          displayName: 'Ada',
+          isGuest: false,
+          avatarUrl: null,
+        },
       });
     });
 
@@ -620,7 +632,13 @@ describe('AuthService', () => {
       expect(result).toEqual({
         accessToken: 'access-token',
         refreshToken: 'refresh-token',
-        user: { id: 'user-1', email: 'ada@example.com', displayName: 'Ada', isGuest: false },
+        user: {
+          id: 'user-1',
+          email: 'ada@example.com',
+          displayName: 'Ada',
+          isGuest: false,
+          avatarUrl: null,
+        },
       });
     });
 
@@ -700,7 +718,13 @@ describe('AuthService', () => {
       expect(result).toEqual({
         accessToken: 'access-token',
         refreshToken: 'refresh-token',
-        user: { id: 'user-1', email: 'ada@example.com', displayName: 'Ada', isGuest: false },
+        user: {
+          id: 'user-1',
+          email: 'ada@example.com',
+          displayName: 'Ada',
+          isGuest: false,
+          avatarUrl: null,
+        },
       });
       expect(prisma.user.update).toHaveBeenCalled();
     });
@@ -801,9 +825,19 @@ describe('AuthService', () => {
         email: 'ada@example.com',
         displayName: 'Ada',
         isGuest: false,
+        avatarUrl: null,
       });
       expect(profile).not.toHaveProperty('passwordHash');
       expect(profile).not.toHaveProperty('refreshTokenHash');
+    });
+
+    it('resolves avatarUrl to a presigned URL when the user has an avatar key', async () => {
+      prisma.user.findUnique.mockResolvedValue(buildUser({ avatarUrl: 'avatars/user-1/pic.png' }));
+
+      const profile = await service.getProfile('user-1');
+
+      expect(storage.getSignedDownloadUrl).toHaveBeenCalledWith('avatars/user-1/pic.png');
+      expect(profile.avatarUrl).toBe('https://signed.example/avatar');
     });
 
     it('throws UnauthorizedException when the user is missing', async () => {
@@ -816,6 +850,37 @@ describe('AuthService', () => {
       prisma.user.findUnique.mockResolvedValue(buildUser({ deletedAt: new Date() }));
 
       await expect(service.getProfile('user-1')).rejects.toBeInstanceOf(UnauthorizedException);
+    });
+  });
+
+  describe('updateDisplayName', () => {
+    it('updates the display name and returns the refreshed profile', async () => {
+      prisma.user.update.mockResolvedValue(buildUser({ displayName: 'New Name' }));
+
+      const profile = await service.updateDisplayName('user-1', 'New Name');
+
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'user-1' },
+        data: { displayName: 'New Name' },
+      });
+      expect(profile).toEqual({
+        id: 'user-1',
+        email: 'ada@example.com',
+        displayName: 'New Name',
+        isGuest: false,
+        avatarUrl: null,
+      });
+    });
+
+    it('resolves avatarUrl in the returned profile when the row has an avatar key', async () => {
+      prisma.user.update.mockResolvedValue(
+        buildUser({ displayName: 'New Name', avatarUrl: 'avatars/user-1/pic.png' }),
+      );
+
+      const profile = await service.updateDisplayName('user-1', 'New Name');
+
+      expect(storage.getSignedDownloadUrl).toHaveBeenCalledWith('avatars/user-1/pic.png');
+      expect(profile.avatarUrl).toBe('https://signed.example/avatar');
     });
   });
 });

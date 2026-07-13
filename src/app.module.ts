@@ -10,6 +10,7 @@ import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
 import { RedisService } from './redis/redis.service';
 import { AuthModule } from './auth/auth.module';
+import { UsersModule } from './users/users.module';
 import { MissionsModule } from './missions/missions.module';
 import { StorageModule } from './storage/storage.module';
 import { ProofModule } from './proof/proof.module';
@@ -81,6 +82,7 @@ function bullConnectionFromRedisUrl(redisUrl: string): {
       }),
     }),
     AuthModule,
+    UsersModule,
     MissionsModule,
     StorageModule,
     ProofModule,

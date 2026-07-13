@@ -1,6 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { StorageService } from './storage.service';
 
@@ -68,6 +68,41 @@ describe('StorageService', () => {
 
     it('rejects an unsupported MIME type with 400', () => {
       expect(() => service.buildProofKey('user-123', 'image/gif')).toThrow(BadRequestException);
+    });
+  });
+
+  describe('buildAvatarKey', () => {
+    it.each([
+      ['image/jpeg', 'jpg'],
+      ['image/png', 'png'],
+      ['image/webp', 'webp'],
+    ])('maps %s to an avatars/<userId>/<uuid>.%s key', (mime, ext) => {
+      const key = service.buildAvatarKey('user-123', mime);
+      expect(key).toMatch(new RegExp(`^avatars/user-123/[0-9a-f-]{36}\\.${ext}$`));
+    });
+
+    it('namespaces avatars separately from proofs', () => {
+      expect(service.buildAvatarKey('user-123', 'image/png')).not.toMatch(/^proofs\//);
+    });
+
+    it('rejects an unsupported MIME type with 400', () => {
+      expect(() => service.buildAvatarKey('user-123', 'application/pdf')).toThrow(
+        BadRequestException,
+      );
+    });
+  });
+
+  describe('deleteObject', () => {
+    it('sends a DeleteObjectCommand for the given key to the configured bucket', async () => {
+      await service.deleteObject('avatars/u/abc.png');
+
+      expect(sendSpy).toHaveBeenCalledTimes(1);
+      const command = sendSpy.mock.calls[0][0];
+      expect(command).toBeInstanceOf(DeleteObjectCommand);
+      expect(command.input).toMatchObject({
+        Bucket: 'sidequest-proofs-dev',
+        Key: 'avatars/u/abc.png',
+      });
     });
   });
 

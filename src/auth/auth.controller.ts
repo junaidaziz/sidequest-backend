@@ -5,6 +5,7 @@ import {
   Headers,
   HttpCode,
   HttpStatus,
+  Patch,
   Post,
   UseGuards,
 } from '@nestjs/common';
@@ -18,6 +19,7 @@ import { LoginDto } from './dto/login.dto';
 import { LogoutResponseDto } from './dto/logout-response.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { SignupDto } from './dto/signup.dto';
+import { UpdateProfileDto } from './dto/update-profile.dto';
 import { UserProfileDto } from './dto/user-profile.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { AuthUser } from './types/jwt-payload.interface';
@@ -138,5 +140,20 @@ export class AuthController {
   @ApiResponse({ status: 429, description: 'Too many requests' })
   me(@CurrentUser() user: AuthUser): Promise<UserProfileDto> {
     return this.authService.getProfile(user.userId);
+  }
+
+  // Authenticated, low-abuse-risk write — the global 100/60s default is the
+  // right tier here, matching how the equivalent POST /missions/:id/save
+  // authenticated mutation is (not) throttled; no tighter @Throttle needed.
+  @Patch('me')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: "Update the authenticated user's display name" })
+  @ApiResponse({ status: 200, type: UserProfileDto })
+  @ApiResponse({ status: 400, description: 'displayName missing or outside the 1-50 char range' })
+  @ApiResponse({ status: 401, description: 'Missing or invalid access token' })
+  @ApiResponse({ status: 429, description: 'Too many requests' })
+  updateMe(@CurrentUser() user: AuthUser, @Body() dto: UpdateProfileDto): Promise<UserProfileDto> {
+    return this.authService.updateDisplayName(user.userId, dto.displayName);
   }
 }
