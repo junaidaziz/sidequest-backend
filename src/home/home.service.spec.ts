@@ -1,6 +1,6 @@
 import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
-import { Mission, MissionCategory, MissionDifficulty } from '@prisma/client';
+import { Mission, MissionCategory, MissionDifficulty, VerificationStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { MissionPoolService } from '../missions/mission-pool.service';
 import { HomeService } from './home.service';
@@ -8,6 +8,7 @@ import { HomeService } from './home.service';
 interface PrismaMock {
   user: { findUnique: jest.Mock };
   savedMission: { findMany: jest.Mock };
+  completion: { groupBy: jest.Mock };
 }
 
 const USER_ID = '22222222-2222-2222-2222-222222222222';
@@ -45,6 +46,7 @@ describe('HomeService', () => {
     prisma = {
       user: { findUnique: jest.fn() },
       savedMission: { findMany: jest.fn() },
+      completion: { groupBy: jest.fn() },
     };
     getActivePool = jest.fn();
     const module: TestingModule = await Test.createTestingModule({
@@ -58,17 +60,19 @@ describe('HomeService', () => {
     service = module.get(HomeService);
   });
 
-  /** Wires the three concurrent reads with the given fixtures. */
+  /** Wires the concurrent reads with the given fixtures. */
   function seed(opts: {
     user?: { totalXp: number; currentStreak: number; longestStreak: number } | null;
     missions?: Mission[];
     saved?: { mission: { settingTags: string[]; crewTags: string[] } }[];
+    completionGroups?: { verificationStatus: VerificationStatus; _count: number }[];
   }) {
     prisma.user.findUnique.mockResolvedValue(
       opts.user === undefined ? { totalXp: 0, currentStreak: 0, longestStreak: 0 } : opts.user,
     );
     getActivePool.mockResolvedValue(opts.missions ?? []);
     prisma.savedMission.findMany.mockResolvedValue(opts.saved ?? []);
+    prisma.completion.groupBy.mockResolvedValue(opts.completionGroups ?? []);
   }
 
   it('throws NotFoundException when the user row is missing (defensive)', async () => {
@@ -166,5 +170,61 @@ describe('HomeService', () => {
     seed({ saved: [] });
     const res = await service.getHome(USER_ID);
     expect(res.savedPacks).toEqual([]);
+  });
+
+  it('groups completions by verificationStatus scoped to the user in a single query', async () => {
+    seed({});
+    await service.getHome(USER_ID);
+    expect(prisma.completion.groupBy).toHaveBeenCalledTimes(1);
+    expect(prisma.completion.groupBy).toHaveBeenCalledWith({
+      by: ['verificationStatus'],
+      where: { userId: USER_ID },
+      _count: true,
+    });
+  });
+
+  it('reports all-zero task stats and a 0 completionRate (not NaN) when there are no completions', async () => {
+    seed({ completionGroups: [] });
+    const res = await service.getHome(USER_ID);
+    expect(res.taskStats).toEqual({
+      total: 0,
+      approved: 0,
+      pending: 0,
+      rejected: 0,
+      completionRate: 0,
+    });
+    expect(Number.isNaN(res.taskStats.completionRate)).toBe(false);
+  });
+
+  it('reduces a mix of all three statuses into correct buckets and completion rate', async () => {
+    seed({
+      completionGroups: [
+        { verificationStatus: VerificationStatus.Approved, _count: 6 },
+        { verificationStatus: VerificationStatus.Pending, _count: 3 },
+        { verificationStatus: VerificationStatus.Rejected, _count: 1 },
+      ],
+    });
+    const res = await service.getHome(USER_ID);
+    expect(res.taskStats).toEqual({
+      total: 10,
+      approved: 6,
+      pending: 3,
+      rejected: 1,
+      completionRate: 0.6,
+    });
+  });
+
+  it('reports a completionRate of 1 when every completion is approved', async () => {
+    seed({
+      completionGroups: [{ verificationStatus: VerificationStatus.Approved, _count: 4 }],
+    });
+    const res = await service.getHome(USER_ID);
+    expect(res.taskStats).toEqual({
+      total: 4,
+      approved: 4,
+      pending: 0,
+      rejected: 0,
+      completionRate: 1,
+    });
   });
 });

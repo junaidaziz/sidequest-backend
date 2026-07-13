@@ -112,6 +112,14 @@ describe('Home (e2e)', () => {
       expect(res.body.streak).toEqual({ currentStreak: 0, longestStreak: 0 });
       expect(res.body.pendingChallenges).toEqual([]);
       expect(res.body.savedPacks).toEqual([]);
+      // Fresh guest has no completions: all-zero tallies, rate 0 (never NaN).
+      expect(res.body.taskStats).toEqual({
+        total: 0,
+        approved: 0,
+        pending: 0,
+        rejected: 0,
+        completionRate: 0,
+      });
       // Daily mission is either null (empty pool) or a mapped mission object.
       if (res.body.dailyMission !== null) {
         expect(res.body.dailyMission).toEqual(

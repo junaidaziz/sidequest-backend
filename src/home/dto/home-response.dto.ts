@@ -31,6 +31,51 @@ export class StreakDto {
   longestStreak!: number;
 }
 
+/**
+ * Aggregate proof-verification counters for the Home screen's "your progress"
+ * strip. Derived from the user's Completion rows grouped by verificationStatus,
+ * so the four buckets always sum to `total` (every row has exactly one status).
+ */
+export class TaskStatsDto {
+  @ApiProperty({
+    example: 10,
+    description:
+      'Every Completion row this user owns, regardless of status — the denominator ' +
+      'for completionRate and the sum of approved + pending + rejected.',
+  })
+  total!: number;
+
+  @ApiProperty({
+    example: 6,
+    description:
+      'Completions whose verificationStatus is Approved — the only ones that count as ' +
+      'genuinely "done" for the completion rate.',
+  })
+  approved!: number;
+
+  @ApiProperty({
+    example: 3,
+    description:
+      'Completions still Pending review (auto-approved later by the timeout job unless ' +
+      'an admin acts first) — surfaced so the user sees work that has not settled yet.',
+  })
+  pending!: number;
+
+  @ApiProperty({
+    example: 1,
+    description: 'Completions an admin (or the timeout path) marked Rejected.',
+  })
+  rejected!: number;
+
+  @ApiProperty({
+    example: 0.6,
+    description:
+      'approved / total as a 0-1 fraction. Deliberately 0 (never NaN) when total is 0, ' +
+      'so a brand-new user with no completions renders a clean 0% instead of a broken value.',
+  })
+  completionRate!: number;
+}
+
 /** A synthetic "pack" of the user's saved missions grouped by shared tags. */
 export class SavedPackDto {
   @ApiProperty({
@@ -73,4 +118,12 @@ export class HomeResponseDto {
     description: 'Saved-mission packs ordered by missionCount descending.',
   })
   savedPacks!: SavedPackDto[];
+
+  @ApiProperty({
+    type: TaskStatsDto,
+    description:
+      'Proof-verification tallies (total/approved/pending/rejected + completion rate) ' +
+      'for this user across all their completions.',
+  })
+  taskStats!: TaskStatsDto;
 }

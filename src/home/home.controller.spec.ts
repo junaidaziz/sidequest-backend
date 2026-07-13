@@ -10,6 +10,7 @@ const RESULT: HomeResponseDto = {
   dailyMission: null,
   pendingChallenges: [],
   savedPacks: [],
+  taskStats: { total: 0, approved: 0, pending: 0, rejected: 0, completionRate: 0 },
 };
 
 const USER: AuthUser = { userId: 'user-1', email: null, isGuest: true };
