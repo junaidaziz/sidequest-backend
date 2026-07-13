@@ -17,6 +17,7 @@ import { ProofModule } from './proof/proof.module';
 import { HomeModule } from './home/home.module';
 import { VerificationModule } from './verification/verification.module';
 import { AdminModule } from './admin/admin.module';
+import { PaymentModule } from './payment/payment.module';
 
 /**
  * `Number(...)` of a non-numeric env value silently produces NaN, which would
@@ -89,6 +90,7 @@ function bullConnectionFromRedisUrl(redisUrl: string): {
     HomeModule,
     VerificationModule,
     AdminModule,
+    PaymentModule,
   ],
   controllers: [AppController],
   providers: [
