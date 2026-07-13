@@ -22,6 +22,13 @@ model User {
   /// Used for refresh-token rotation; never stores the raw token.
   refreshTokenHash String?
   displayName  String?
+  /// S3 object key for the user's profile picture (not a full URL — resolved
+  /// to a presigned GET URL at read time, same convention as Completion.proofKey).
+  avatarUrl    String?
+  /// Stripe Customer object id. Null until the user's first SetupIntent.
+  /// Independent of isGuest — a guest can add a payment method before ever
+  /// creating a full account, and it carries over on upgrade-in-place.
+  stripeCustomerId String? @unique
   isGuest      Boolean   @default(true)
   /// Simple flat XP rules: totalXp is the sum of each completed mission's
   /// xpReward, no multipliers. Level is derived at read time from totalXp
@@ -121,6 +128,16 @@ enum ProofType {
   text
 }
 
+/// Verification lifecycle for a Completion. XP is awarded immediately on
+/// submission regardless of status (a deliberate product decision — optimistic
+/// XP, reversed on Rejected) rather than withheld until Approved, so this
+/// status drives review UI and progress-dashboard bucketing, not XP timing.
+enum VerificationStatus {
+  Pending
+  Approved
+  Rejected
+}
+
 /// A single completed mission, with its proof and the XP it awarded. The
 /// guest-completion gate ("one free mission with no account") is enforced by
 /// counting a guest user's rows here, not by a separate flag — so the count
@@ -139,6 +156,21 @@ model Completion {
   xpAwarded   Int
   completedAt DateTime  @default(now())
 
+  /// Starts Pending on submit. Auto-approved by a BullMQ delayed job after
+  /// PROOF_AUTO_APPROVE_TIMEOUT_HOURS unless a manual admin override
+  /// (PATCH /admin/completions/:id/verification) already moved it to
+  /// Approved or Rejected — the job re-checks status before writing.
+  verificationStatus VerificationStatus @default(Pending)
+  verifiedAt         DateTime?
+  /// Free-text identifier of who/what verified this — "auto" for the timeout
+  /// job, or the admin key's identity for a manual override. Not a User
+  /// foreign key: there is no in-app admin-user concept, only an
+  /// x-admin-key-header-gated route (see AdminGuard).
+  verifiedBy         String?
+  /// Required when verificationStatus is set to Rejected; null otherwise.
+  rejectionReason    String?
+
   @@index([userId])
+  @@index([verificationStatus])
   @@map("completions")
 }

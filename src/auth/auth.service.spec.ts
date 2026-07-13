@@ -52,6 +52,8 @@ function buildUser(overrides: Partial<User> = {}): User {
     refreshTokenHash: null,
     googleId: null,
     displayName: 'Ada',
+    avatarUrl: null,
+    stripeCustomerId: null,
     isGuest: false,
     totalXp: 0,
     currentStreak: 0,
