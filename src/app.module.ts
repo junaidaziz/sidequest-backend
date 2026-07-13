@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ThrottlerStorageRedisService } from '@nest-lab/throttler-storage-redis';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { BullModule } from '@nestjs/bullmq';
 import { APP_GUARD } from '@nestjs/core';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
@@ -13,6 +14,8 @@ import { MissionsModule } from './missions/missions.module';
 import { StorageModule } from './storage/storage.module';
 import { ProofModule } from './proof/proof.module';
 import { HomeModule } from './home/home.module';
+import { VerificationModule } from './verification/verification.module';
+import { AdminModule } from './admin/admin.module';
 
 /**
  * `Number(...)` of a non-numeric env value silently produces NaN, which would
@@ -22,6 +25,27 @@ import { HomeModule } from './home/home.module';
 function parseThrottleEnv(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+/**
+ * BullMQ needs host/port/auth connection options, not the ioredis instance the
+ * throttler reuses. Parse them out of the single REDIS_URL (same source of
+ * truth) so there is no second Redis config surface. Falls back to the local
+ * default when unset, matching RedisService.
+ */
+function bullConnectionFromRedisUrl(redisUrl: string): {
+  host: string;
+  port: number;
+  username?: string;
+  password?: string;
+} {
+  const parsed = new URL(redisUrl);
+  return {
+    host: parsed.hostname,
+    port: parsed.port ? Number(parsed.port) : 6379,
+    username: parsed.username ? decodeURIComponent(parsed.username) : undefined,
+    password: parsed.password ? decodeURIComponent(parsed.password) : undefined,
+  };
 }
 
 @Module({
@@ -45,11 +69,24 @@ function parseThrottleEnv(value: string | undefined, fallback: number): number {
         storage: new ThrottlerStorageRedisService(redis),
       }),
     }),
+    // BullMQ root connection for every queue (currently the verification
+    // auto-approve queue). Connection built from REDIS_URL, same store the
+    // throttler and cache use.
+    BullModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        connection: bullConnectionFromRedisUrl(
+          config.get<string>('REDIS_URL') ?? 'redis://localhost:6379',
+        ),
+      }),
+    }),
     AuthModule,
     MissionsModule,
     StorageModule,
     ProofModule,
     HomeModule,
+    VerificationModule,
+    AdminModule,
   ],
   controllers: [AppController],
   providers: [

@@ -3,6 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { ProofType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
+import { VerificationQueueService } from '../verification/verification-queue.service';
 import { ProofService } from './proof.service';
 
 interface TxMock {
@@ -22,6 +23,10 @@ interface StorageMock {
   buildProofKey: jest.Mock;
   uploadObject: jest.Mock;
   getSignedDownloadUrl: jest.Mock;
+}
+
+interface VerificationQueueMock {
+  enqueueAutoApprove: jest.Mock;
 }
 
 const MISSION_ID = '11111111-1111-1111-1111-111111111111';
@@ -74,6 +79,7 @@ describe('ProofService', () => {
   let prisma: PrismaMock;
   let tx: TxMock;
   let storage: StorageMock;
+  let verificationQueue: VerificationQueueMock;
 
   beforeEach(async () => {
     tx = {
@@ -92,12 +98,16 @@ describe('ProofService', () => {
       uploadObject: jest.fn(),
       getSignedDownloadUrl: jest.fn(),
     };
+    verificationQueue = {
+      enqueueAutoApprove: jest.fn().mockResolvedValue(undefined),
+    };
 
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
         ProofService,
         { provide: PrismaService, useValue: prisma },
         { provide: StorageService, useValue: storage },
+        { provide: VerificationQueueService, useValue: verificationQueue },
       ],
     }).compile();
 
@@ -360,6 +370,45 @@ describe('ProofService', () => {
           data: expect.objectContaining({ currentStreak: 5, longestStreak: 5 }),
         }),
       );
+    });
+  });
+
+  describe('verification auto-approve scheduling', () => {
+    it('enqueues the delayed auto-approval for the created completion after commit', async () => {
+      stubHappyTransaction();
+
+      await service.submitProof(USER_ID, MISSION_ID, undefined, 'caption');
+
+      expect(verificationQueue.enqueueAutoApprove).toHaveBeenCalledWith('completion-1');
+    });
+
+    it('does not enqueue when submission fails before the completion is created', async () => {
+      prisma.mission.findUnique.mockResolvedValue(activeMission());
+      prisma.user.findUnique.mockResolvedValue(precheckUser());
+      prisma.completion.count.mockResolvedValue(1); // guest over the limit
+
+      await expect(
+        service.submitProof(USER_ID, MISSION_ID, undefined, 'caption'),
+      ).rejects.toBeDefined();
+      expect(verificationQueue.enqueueAutoApprove).not.toHaveBeenCalled();
+    });
+
+    it('still returns the completion when enqueue fails (best-effort side effect)', async () => {
+      stubHappyTransaction();
+      verificationQueue.enqueueAutoApprove.mockRejectedValue(new Error('redis down'));
+
+      await expect(
+        service.submitProof(USER_ID, MISSION_ID, undefined, 'caption'),
+      ).resolves.toMatchObject({ completionId: 'completion-1' });
+    });
+
+    it('tolerates a non-Error enqueue rejection without a stack trace', async () => {
+      stubHappyTransaction();
+      verificationQueue.enqueueAutoApprove.mockRejectedValue('redis down');
+
+      await expect(
+        service.submitProof(USER_ID, MISSION_ID, undefined, 'caption'),
+      ).resolves.toMatchObject({ completionId: 'completion-1' });
     });
   });
 });

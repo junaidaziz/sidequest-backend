@@ -8,6 +8,7 @@ import {
 import { ProofType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
+import { VerificationQueueService } from '../verification/verification-queue.service';
 import { ProofResponseDto } from './dto/proof-response.dto';
 import { computeStreak } from './streak.util';
 
@@ -21,6 +22,7 @@ export class ProofService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly storage: StorageService,
+    private readonly verificationQueue: VerificationQueueService,
   ) {}
 
   /**
@@ -142,6 +144,19 @@ export class ProofService {
 
       return { completion: createdCompletion, updatedUser: newUserState };
     });
+
+    // Schedule the delayed auto-approval now that the completion is committed.
+    // Best-effort side effect: a queue outage must not fail an already-recorded
+    // completion (XP is already awarded), so a failure is logged, not thrown —
+    // the completion simply stays Pending until an admin resolves it.
+    try {
+      await this.verificationQueue.enqueueAutoApprove(completion.id);
+    } catch (error) {
+      this.logger.error(
+        `Failed to enqueue auto-approval for completion ${completion.id}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+    }
 
     const proofUrl =
       proofType === ProofType.photo && proofKey
