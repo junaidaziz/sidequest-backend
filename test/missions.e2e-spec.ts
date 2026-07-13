@@ -5,6 +5,7 @@ import { AppModule } from './../src/app.module';
 import { AllExceptionsFilter } from './../src/common/filters/all-exceptions.filter';
 import { PrismaService } from './../src/prisma/prisma.service';
 import { MissionPoolService } from './../src/missions/mission-pool.service';
+import { resetThrottleState } from './support/reset-throttle';
 
 /**
  * Runs against the local dev database (via docker-compose), seeding two known
@@ -56,6 +57,7 @@ describe('Missions (e2e)', () => {
     prisma = app.get(PrismaService);
     missionPool = app.get(MissionPoolService);
     await app.init();
+    await resetThrottleState(app);
 
     const base = {
       category: 'discover' as const,

@@ -443,6 +443,41 @@ describe('AuthService', () => {
     });
   });
 
+  describe('logout', () => {
+    it('nulls the stored refresh-token hash and returns success', async () => {
+      prisma.user.update.mockResolvedValue(buildUser({ refreshTokenHash: null }));
+
+      const result = await service.logout('user-1');
+
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'user-1' },
+        data: { refreshTokenHash: null },
+      });
+      expect(result).toEqual({ success: true });
+    });
+
+    it('leaves a subsequent refresh with the old token unable to authenticate', async () => {
+      // After logout the row's refreshTokenHash is null; refresh() must reject
+      // the still-signed-but-now-orphaned refresh token via the null-hash guard,
+      // never reaching the bcrypt.compare against a null hash.
+      prisma.user.update.mockResolvedValue(buildUser({ refreshTokenHash: null }));
+      await service.logout('user-1');
+
+      jwtService.verifyAsync.mockResolvedValue({
+        sub: 'user-1',
+        isGuest: false,
+        type: TokenType.Refresh,
+      });
+      prisma.user.findUnique.mockResolvedValue(buildUser({ refreshTokenHash: null }));
+
+      await expect(
+        service.refresh({ refreshToken: 'captured.before.logout' }),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+      // The null-hash guard short-circuits before any hash comparison.
+      expect(bcryptCompare).not.toHaveBeenCalled();
+    });
+  });
+
   describe('getProfile', () => {
     it('returns the public-safe profile without secret fields', async () => {
       prisma.user.findUnique.mockResolvedValue(

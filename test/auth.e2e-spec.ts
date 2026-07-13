@@ -4,6 +4,7 @@ import request from 'supertest';
 import { AppModule } from './../src/app.module';
 import { AllExceptionsFilter } from './../src/common/filters/all-exceptions.filter';
 import { PrismaService } from './../src/prisma/prisma.service';
+import { resetThrottleState } from './support/reset-throttle';
 
 /**
  * Runs against the local dev database (via docker-compose) for now, cleaning
@@ -27,6 +28,9 @@ describe('Auth (e2e)', () => {
     app.useGlobalFilters(new AllExceptionsFilter());
     prisma = app.get(PrismaService);
     await app.init();
+    // Isolate this suite's rate-limit tiers from state left in shared Redis by
+    // other suites/prior runs — see resetThrottleState.
+    await resetThrottleState(app);
   });
 
   afterAll(async () => {
@@ -143,6 +147,39 @@ describe('Auth (e2e)', () => {
       await request(app.getHttpServer())
         .post('/auth/refresh')
         .send({ refreshToken: 'not.a.jwt' })
+        .expect(401);
+    });
+  });
+
+  describe('POST /auth/logout', () => {
+    it('returns 401 without an access token', async () => {
+      await request(app.getHttpServer()).post('/auth/logout').expect(401);
+    });
+
+    it('revokes the server-side refresh token so the old token can no longer refresh', async () => {
+      // Use a fresh guest session (guest throttle tier) rather than another
+      // /auth/login, so this suite does not exceed the tighter login tier.
+      const guest = await request(app.getHttpServer()).post('/auth/guest').expect(201);
+
+      // The captured refresh token works before logout.
+      await request(app.getHttpServer())
+        .post('/auth/refresh')
+        .send({ refreshToken: guest.body.refreshToken })
+        .expect(200);
+
+      // A fresh login/guest rotates the hash, so re-fetch a usable pair to log out.
+      const guest2 = await request(app.getHttpServer()).post('/auth/guest').expect(201);
+
+      const logout = await request(app.getHttpServer())
+        .post('/auth/logout')
+        .set('Authorization', `Bearer ${guest2.body.accessToken}`)
+        .expect(200);
+      expect(logout.body).toEqual({ success: true });
+
+      // The now-orphaned refresh token is rejected.
+      await request(app.getHttpServer())
+        .post('/auth/refresh')
+        .send({ refreshToken: guest2.body.refreshToken })
         .expect(401);
     });
   });

@@ -8,6 +8,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AuthResponseDto } from './dto/auth-response.dto';
 import { AuthTokensDto } from './dto/auth-tokens.dto';
 import { LoginDto } from './dto/login.dto';
+import { LogoutResponseDto } from './dto/logout-response.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { SignupDto } from './dto/signup.dto';
 import { UserProfileDto } from './dto/user-profile.dto';
@@ -175,6 +176,25 @@ export class AuthService {
 
     const tokens = await this.persistTokens(user.id, user.isGuest);
     return { ...tokens, user: this.toProfile(user) };
+  }
+
+  /**
+   * Revokes the caller's server-side refresh token by nulling `refreshTokenHash`.
+   * A subsequent `/auth/refresh` with the now-orphaned token is rejected by the
+   * `!user.refreshTokenHash` guard in `refresh()` — closing the window where a
+   * refresh token captured before logout stays valid until natural expiry.
+   *
+   * Idempotent: the caller is already authenticated (JwtAuthGuard + JwtStrategy
+   * confirmed the row exists and is not soft-deleted), so a plain update is safe;
+   * re-nulling an already-null hash is a no-op that still returns success.
+   */
+  async logout(userId: string): Promise<LogoutResponseDto> {
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { refreshTokenHash: null },
+    });
+    this.logger.log(`Refresh token revoked on logout: ${userId}`);
+    return { success: true };
   }
 
   /** Returns the public-safe profile of the authenticated user. */

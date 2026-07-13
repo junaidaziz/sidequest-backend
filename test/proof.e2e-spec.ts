@@ -4,6 +4,7 @@ import request from 'supertest';
 import { AppModule } from './../src/app.module';
 import { AllExceptionsFilter } from './../src/common/filters/all-exceptions.filter';
 import { PrismaService } from './../src/prisma/prisma.service';
+import { resetThrottleState } from './support/reset-throttle';
 
 /**
  * Runs against the local dev database (via docker-compose) AND real LocalStack
@@ -49,6 +50,7 @@ describe('Proof submission (e2e)', () => {
     app.useGlobalFilters(new AllExceptionsFilter());
     prisma = app.get(PrismaService);
     await app.init();
+    await resetThrottleState(app);
 
     const mission = await prisma.mission.create({
       data: {

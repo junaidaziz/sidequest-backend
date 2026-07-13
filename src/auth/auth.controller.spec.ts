@@ -14,6 +14,7 @@ describe('AuthController', () => {
     signup: jest.Mock;
     login: jest.Mock;
     refresh: jest.Mock;
+    logout: jest.Mock;
     getProfile: jest.Mock;
   };
 
@@ -23,6 +24,7 @@ describe('AuthController', () => {
       signup: jest.fn().mockResolvedValue(TOKENS),
       login: jest.fn().mockResolvedValue(TOKENS),
       refresh: jest.fn().mockResolvedValue(TOKENS),
+      logout: jest.fn().mockResolvedValue({ success: true }),
       getProfile: jest.fn(),
     };
 
@@ -72,6 +74,15 @@ describe('AuthController', () => {
 
     expect(service.refresh).toHaveBeenCalledWith(dto);
     expect(result).toEqual(TOKENS);
+  });
+
+  it('POST /auth/logout revokes the refresh token for the authenticated user', async () => {
+    const user: AuthUser = { userId: 'user-1', email: 'ada@example.com', isGuest: false };
+
+    const result = await controller.logout(user);
+
+    expect(service.logout).toHaveBeenCalledWith('user-1');
+    expect(result).toEqual({ success: true });
   });
 
   it('GET /auth/me returns the profile for the authenticated user', async () => {

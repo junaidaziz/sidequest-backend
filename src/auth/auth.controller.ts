@@ -14,6 +14,7 @@ import { AuthService } from './auth.service';
 import { CurrentUser } from './decorators/current-user.decorator';
 import { AuthResponseDto } from './dto/auth-response.dto';
 import { LoginDto } from './dto/login.dto';
+import { LogoutResponseDto } from './dto/logout-response.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { SignupDto } from './dto/signup.dto';
 import { UserProfileDto } from './dto/user-profile.dto';
@@ -88,6 +89,20 @@ export class AuthController {
   @ApiResponse({ status: 429, description: 'Too many requests' })
   refresh(@Body() dto: RefreshTokenDto): Promise<AuthResponseDto> {
     return this.authService.refresh(dto);
+  }
+
+  @Post('logout')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: "Revoke the caller's server-side refresh token (invalidates future /auth/refresh)",
+  })
+  @ApiResponse({ status: 200, type: LogoutResponseDto })
+  @ApiResponse({ status: 401, description: 'Missing or invalid access token' })
+  @ApiResponse({ status: 429, description: 'Too many requests' })
+  logout(@CurrentUser() user: AuthUser): Promise<LogoutResponseDto> {
+    return this.authService.logout(user.userId);
   }
 
   @Get('me')
