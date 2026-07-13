@@ -62,6 +62,13 @@ async function bootstrap() {
     SwaggerModule.setup('docs', app, document);
   }
 
+  // Without this, a container orchestrator's SIGTERM (Railway on redeploy or
+  // scale-down) exits the process immediately: in-flight requests are cut at
+  // the socket, Prisma's pool closes without draining open transactions, and
+  // BullMQ workers abandon in-progress jobs instead of finishing or
+  // releasing them cleanly.
+  app.enableShutdownHooks();
+
   const port = process.env.PORT ?? 3000;
   await app.listen(port);
   logger.log(`SideQuest API listening on port ${port}` + (docsEnabled ? ' — docs at /docs' : ''));
