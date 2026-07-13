@@ -13,6 +13,7 @@ import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { CurrentUser } from './decorators/current-user.decorator';
 import { AuthResponseDto } from './dto/auth-response.dto';
+import { GoogleAuthDto } from './dto/google-auth.dto';
 import { LoginDto } from './dto/login.dto';
 import { LogoutResponseDto } from './dto/logout-response.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
@@ -65,6 +66,29 @@ export class AuthController {
     @Headers('authorization') authorization?: string,
   ): Promise<AuthResponseDto> {
     return this.authService.signup(dto, authorization);
+  }
+
+  @Post('google')
+  @Throttle(SENSITIVE_THROTTLE)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Authenticate with a Google ID token',
+    description:
+      'Verifies a Google-issued ID token and resolves to one of four outcomes: ' +
+      'returns a returning Google user, auto-links Google to an existing account ' +
+      'matching the verified email, upgrades a guest in place if a guest bearer ' +
+      'token is supplied, or creates a brand-new full account. 200 is returned for ' +
+      'every outcome since both new-account and existing-account results are possible.',
+  })
+  @ApiResponse({ status: 200, type: AuthResponseDto })
+  @ApiResponse({ status: 400, description: 'Validation failed' })
+  @ApiResponse({ status: 401, description: 'Google authentication failed' })
+  @ApiResponse({ status: 429, description: 'Too many requests' })
+  google(
+    @Body() dto: GoogleAuthDto,
+    @Headers('authorization') authorization?: string,
+  ): Promise<AuthResponseDto> {
+    return this.authService.googleAuth(dto, authorization);
   }
 
   @Post('login')

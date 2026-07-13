@@ -4,9 +4,11 @@ import { JwtService, JwtSignOptions } from '@nestjs/jwt';
 import { Prisma, User } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { createHash, randomUUID } from 'crypto';
+import { OAuth2Client } from 'google-auth-library';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthResponseDto } from './dto/auth-response.dto';
 import { AuthTokensDto } from './dto/auth-tokens.dto';
+import { GoogleAuthDto } from './dto/google-auth.dto';
 import { LoginDto } from './dto/login.dto';
 import { LogoutResponseDto } from './dto/logout-response.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
@@ -17,6 +19,13 @@ import { JwtPayload, TokenType } from './types/jwt-payload.interface';
 const BCRYPT_ROUNDS = 12;
 /** Deliberately identical for unknown-email and wrong-password to avoid enumeration. */
 const GENERIC_AUTH_ERROR = 'Invalid email or password';
+/**
+ * Single non-leaking error for every Google sign-in rejection (bad signature,
+ * unverified email, missing claims, or a concurrent-sign-in write race) — same
+ * enumeration-resistant philosophy as GENERIC_AUTH_ERROR, so the caller can
+ * never tell which specific check failed.
+ */
+const GENERIC_GOOGLE_AUTH_ERROR = 'Google authentication failed';
 const INVALID_REFRESH_ERROR = 'Invalid refresh token';
 /**
  * A real bcrypt hash (cost 12) with no corresponding password. Compared
@@ -39,6 +48,14 @@ export class AuthService {
   private readonly accessTtl: string;
   private readonly refreshTtl: string;
   private readonly guestRefreshTtl: string;
+  private readonly googleWebClientId: string;
+  private readonly googleIosClientId: string;
+  /**
+   * Stateless verifier for Google-issued ID tokens. Instantiated without a
+   * client id/secret because we only ever *verify* tokens (audience is passed
+   * per-call to verifyIdToken), never perform a server-side OAuth code exchange.
+   */
+  private readonly googleClient = new OAuth2Client();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -49,6 +66,8 @@ export class AuthService {
     this.accessTtl = config.getOrThrow<string>('JWT_ACCESS_TOKEN_TTL');
     this.refreshTtl = config.getOrThrow<string>('JWT_REFRESH_TOKEN_TTL');
     this.guestRefreshTtl = config.getOrThrow<string>('GUEST_TOKEN_TTL');
+    this.googleWebClientId = config.getOrThrow<string>('GOOGLE_OAUTH_WEB_CLIENT_ID');
+    this.googleIosClientId = config.getOrThrow<string>('GOOGLE_OAUTH_IOS_CLIENT_ID');
   }
 
   /** Bootstraps an anonymous session: a credential-less guest User + token pair. */
@@ -119,8 +138,113 @@ export class AuthService {
     } catch (error) {
       // Backstop for the race between the uniqueness pre-check and the write:
       // a concurrent signup on the same email must still surface as 409, not 500.
-      if (this.isUniqueEmailViolation(error)) {
+      if (this.isUniqueConstraintViolation(error)) {
         throw new ConflictException('Email already registered');
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Authenticates (or provisions) an account from a verified Google ID token.
+   * Resolution order, first match wins:
+   *   1. googleId already on a row  → returning Google login.
+   *   2. verified email matches a row → auto-link Google to that account.
+   *   3. a valid guest bearer token   → upgrade that guest row in place.
+   *   4. otherwise                     → create a brand-new full account.
+   * Never creates a password; a Google-only account has passwordHash = null.
+   */
+  async googleAuth(dto: GoogleAuthDto, bearerToken?: string): Promise<AuthResponseDto> {
+    const { sub, email, displayName } = await this.verifyGoogleIdToken(dto.idToken);
+
+    // 1. Returning Google user — the googleId is the stable identity. isGuest is
+    // never true on such a row (only step 2/3 set googleId and both clear it),
+    // but pass user.isGuest through defensively rather than special-casing.
+    // A soft-deleted row (deletedAt set) must not authenticate, matching
+    // login()/refresh()/getProfile() — treat it as if the googleId weren't
+    // taken, falling through to auto-link/guest-upgrade/new-account below.
+    const byGoogleId = await this.prisma.user.findUnique({ where: { googleId: sub } });
+    if (byGoogleId && !byGoogleId.deletedAt) {
+      const tokens = await this.persistTokens(byGoogleId.id, byGoogleId.isGuest);
+      return { ...tokens, user: this.toProfile(byGoogleId) };
+    }
+
+    try {
+      // 2. Auto-link: an existing account (password-based or otherwise) owns this
+      // verified email. The email match is authoritative. Never overwrite a
+      // user-set displayName, and never touch passwordHash. Same deletedAt
+      // exclusion as step 1 — a soft-deleted account's email must not
+      // auto-link; fall through to guest-upgrade/new-account instead.
+      // Fold the fresh refreshTokenHash into the same write as steps 3/4,
+      // rather than a separate persistTokens() call, so the link and the
+      // token-hash rotation can't land as two independently-failable writes.
+      const byEmail = await this.prisma.user.findUnique({ where: { email } });
+      if (byEmail && !byEmail.deletedAt) {
+        const { accessToken, refreshToken, refreshTokenHash } = await this.buildTokenSet(
+          byEmail.id,
+          false,
+        );
+        const linked = await this.prisma.user.update({
+          where: { id: byEmail.id },
+          data: {
+            googleId: sub,
+            isGuest: false,
+            displayName: byEmail.displayName ?? displayName,
+            refreshTokenHash,
+          },
+        });
+        this.logger.log(`Existing account ${linked.id} linked to Google`);
+        return { accessToken, refreshToken, user: this.toProfile(linked) };
+      }
+
+      // 3. Guest upgrade in place — mirrors signup()'s guest branch so mission/XP
+      // history carries over. Fold the fresh refreshTokenHash into the same write.
+      const guestUserId = this.resolveGuestUserId(bearerToken);
+      if (guestUserId) {
+        const guest = await this.prisma.user.findUnique({ where: { id: guestUserId } });
+        if (guest && guest.isGuest && !guest.deletedAt) {
+          const { accessToken, refreshToken, refreshTokenHash } = await this.buildTokenSet(
+            guest.id,
+            false,
+          );
+          const upgraded = await this.prisma.user.update({
+            where: { id: guest.id },
+            data: {
+              email,
+              googleId: sub,
+              displayName: guest.displayName ?? displayName,
+              isGuest: false,
+              refreshTokenHash,
+            },
+          });
+          this.logger.log(`Guest ${guest.id} upgraded to full account via Google`);
+          return { accessToken, refreshToken, user: this.toProfile(upgraded) };
+        }
+      }
+
+      // 4. Brand-new account. No password is ever set for a Google-first user.
+      const id = randomUUID();
+      const { accessToken, refreshToken, refreshTokenHash } = await this.buildTokenSet(id, false);
+      const created = await this.prisma.user.create({
+        data: {
+          id,
+          email,
+          googleId: sub,
+          displayName,
+          isGuest: false,
+          passwordHash: null,
+          refreshTokenHash,
+        },
+      });
+      this.logger.log(`New account created via Google: ${id}`);
+      return { accessToken, refreshToken, user: this.toProfile(created) };
+    } catch (error) {
+      // Backstop for the race between the read-checks above and the write: a
+      // concurrent Google sign-in on the same email should look like "try
+      // again", not a 409 email-taken signal (the user isn't choosing an email
+      // in an OAuth flow), so re-throw as the same generic auth failure.
+      if (this.isUniqueConstraintViolation(error)) {
+        throw new UnauthorizedException(GENERIC_GOOGLE_AUTH_ERROR);
       }
       throw error;
     }
@@ -273,6 +397,34 @@ export class AuthService {
     }
   }
 
+  /**
+   * Verifies a Google ID token's signature and audience via google-auth-library
+   * (never a hand-rolled decode) and returns the claims we trust. Every failure
+   * mode — bad signature, wrong audience, unverified email, or missing sub/email
+   * — collapses to the same generic UnauthorizedException so nothing about which
+   * check failed leaks to the caller, and no DB write is attempted.
+   */
+  private async verifyGoogleIdToken(
+    idToken: string,
+  ): Promise<{ sub: string; email: string; displayName: string | null }> {
+    try {
+      const ticket = await this.googleClient.verifyIdToken({
+        idToken,
+        audience: [this.googleWebClientId, this.googleIosClientId],
+      });
+      const payload = ticket.getPayload();
+      if (!payload || payload.email_verified !== true || !payload.sub || !payload.email) {
+        throw new UnauthorizedException(GENERIC_GOOGLE_AUTH_ERROR);
+      }
+      return { sub: payload.sub, email: payload.email, displayName: payload.name ?? null };
+    } catch (error) {
+      if (error instanceof UnauthorizedException) {
+        throw error;
+      }
+      throw new UnauthorizedException(GENERIC_GOOGLE_AUTH_ERROR);
+    }
+  }
+
   /** Builds sign options with the secret and a `ms`-style TTL from config. */
   private signOptions(expiresIn: string): JwtSignOptions {
     return {
@@ -281,13 +433,19 @@ export class AuthService {
     };
   }
 
-  /** True when a Prisma write failed the unique constraint on `email`. */
-  private isUniqueEmailViolation(error: unknown): boolean {
-    return (
-      error instanceof Prisma.PrismaClientKnownRequestError &&
-      error.code === 'P2002' &&
-      (error.meta?.target as string[] | undefined)?.includes('email') === true
-    );
+  /**
+   * True when a Prisma write failed the unique constraint on `email` or
+   * `googleId`. `signup()` only ever races on `email`; `googleAuth()` can
+   * race on either (two concurrent sign-ins for the same Google `sub`, or
+   * the same email) — checking both fields is a no-op for signup()'s own
+   * writes since a `googleId` violation can't occur there.
+   */
+  private isUniqueConstraintViolation(error: unknown): boolean {
+    if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
+      return false;
+    }
+    const target = error.meta?.target as string[] | undefined;
+    return target?.includes('email') === true || target?.includes('googleId') === true;
   }
 
   /** SHA-256 the (long) JWT before bcrypt to sidestep bcrypt's 72-byte input cap. */

@@ -12,6 +12,7 @@ describe('AuthController', () => {
   let service: {
     createGuest: jest.Mock;
     signup: jest.Mock;
+    googleAuth: jest.Mock;
     login: jest.Mock;
     refresh: jest.Mock;
     logout: jest.Mock;
@@ -22,6 +23,7 @@ describe('AuthController', () => {
     service = {
       createGuest: jest.fn().mockResolvedValue(TOKENS),
       signup: jest.fn().mockResolvedValue(TOKENS),
+      googleAuth: jest.fn().mockResolvedValue(TOKENS),
       login: jest.fn().mockResolvedValue(TOKENS),
       refresh: jest.fn().mockResolvedValue(TOKENS),
       logout: jest.fn().mockResolvedValue({ success: true }),
@@ -56,6 +58,40 @@ describe('AuthController', () => {
     await controller.signup(dto);
 
     expect(service.signup).toHaveBeenCalledWith(dto, undefined);
+  });
+
+  it('POST /auth/google forwards the DTO and Authorization header', async () => {
+    const dto = { idToken: 'google.id.token' };
+
+    const result = await controller.google(dto, 'Bearer guest-token');
+
+    expect(service.googleAuth).toHaveBeenCalledWith(dto, 'Bearer guest-token');
+    expect(result).toEqual(TOKENS);
+  });
+
+  it('POST /auth/google works without an Authorization header', async () => {
+    const dto = { idToken: 'google.id.token' };
+
+    await controller.google(dto);
+
+    expect(service.googleAuth).toHaveBeenCalledWith(dto, undefined);
+  });
+
+  it('POST /auth/google is rate-limited in the same sensitive tier as login/signup', () => {
+    // The @Throttle metadata lands on the route handler function; comparing the
+    // google handler's tier to login's proves it shares SENSITIVE_THROTTLE
+    // (5 req / 60s) without hard-coding the numbers in two places.
+    const limitKey = 'THROTTLER:LIMITdefault';
+    const ttlKey = 'THROTTLER:TTLdefault';
+    const googleLimit = Reflect.getMetadata(limitKey, AuthController.prototype.google) as unknown;
+    const googleTtl = Reflect.getMetadata(ttlKey, AuthController.prototype.google) as unknown;
+
+    expect(googleLimit).toBe(
+      Reflect.getMetadata(limitKey, AuthController.prototype.login) as unknown,
+    );
+    expect(googleTtl).toBe(Reflect.getMetadata(ttlKey, AuthController.prototype.login) as unknown);
+    expect(googleLimit).toBe(5);
+    expect(googleTtl).toBe(60_000);
   });
 
   it('POST /auth/login forwards the credentials DTO', async () => {

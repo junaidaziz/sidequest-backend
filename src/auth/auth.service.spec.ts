@@ -4,6 +4,7 @@ import { JwtService } from '@nestjs/jwt';
 import { Test, TestingModule } from '@nestjs/testing';
 import { Prisma, User } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
+import { OAuth2Client } from 'google-auth-library';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthService } from './auth.service';
 import { TokenType } from './types/jwt-payload.interface';
@@ -13,15 +14,35 @@ jest.mock('bcrypt', () => ({
   compare: jest.fn(),
 }));
 
+// Auto-mocked: OAuth2Client.prototype.verifyIdToken becomes a jest.fn shared by
+// every instance the service constructs, so no real network/JWKS call is made.
+jest.mock('google-auth-library');
+
 const bcryptHash = bcrypt.hash as jest.Mock;
 const bcryptCompare = bcrypt.compare as jest.Mock;
+const verifyIdToken = OAuth2Client.prototype.verifyIdToken as jest.Mock;
 
 const CONFIG: Record<string, string> = {
   JWT_SECRET: 'test-secret',
   JWT_ACCESS_TOKEN_TTL: '15m',
   JWT_REFRESH_TOKEN_TTL: '30d',
   GUEST_TOKEN_TTL: '90d',
+  GOOGLE_OAUTH_WEB_CLIENT_ID: 'web-client-id.apps.googleusercontent.com',
+  GOOGLE_OAUTH_IOS_CLIENT_ID: 'ios-client-id.apps.googleusercontent.com',
 };
+
+/** Points OAuth2Client.verifyIdToken at a fake ticket carrying the given claims. */
+function mockGooglePayload(overrides: Record<string, unknown> = {}): void {
+  verifyIdToken.mockResolvedValue({
+    getPayload: () => ({
+      sub: 'google-sub',
+      email: 'ada@example.com',
+      email_verified: true,
+      name: 'Google Name',
+      ...overrides,
+    }),
+  });
+}
 
 function buildUser(overrides: Partial<User> = {}): User {
   return {
@@ -29,6 +50,7 @@ function buildUser(overrides: Partial<User> = {}): User {
     email: 'ada@example.com',
     passwordHash: 'hashed-password',
     refreshTokenHash: null,
+    googleId: null,
     displayName: 'Ada',
     isGuest: false,
     totalXp: 0,
@@ -60,6 +82,7 @@ describe('AuthService', () => {
   beforeEach(async () => {
     bcryptHash.mockReset().mockResolvedValue('bcrypt-hash');
     bcryptCompare.mockReset().mockResolvedValue(false);
+    verifyIdToken.mockReset();
     prisma = {
       user: {
         create: jest.fn(),
@@ -297,6 +320,291 @@ describe('AuthService', () => {
       await expect(
         service.signup({ email: 'ada@example.com', password: 'password123' }),
       ).rejects.toBe(dbError);
+    });
+  });
+
+  describe('googleAuth', () => {
+    it('throws UnauthorizedException and touches no DB row when verification throws', async () => {
+      verifyIdToken.mockRejectedValue(new Error('invalid signature'));
+
+      await expect(service.googleAuth({ idToken: 'bad.token' })).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+      expect(prisma.user.findUnique).not.toHaveBeenCalled();
+      expect(prisma.user.create).not.toHaveBeenCalled();
+      expect(prisma.user.update).not.toHaveBeenCalled();
+    });
+
+    it('rejects a token whose email is not verified, without any DB write', async () => {
+      mockGooglePayload({ email_verified: false });
+
+      await expect(service.googleAuth({ idToken: 'unverified.token' })).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+      expect(prisma.user.findUnique).not.toHaveBeenCalled();
+      expect(prisma.user.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects when the ticket carries no payload', async () => {
+      verifyIdToken.mockResolvedValue({ getPayload: () => undefined });
+
+      await expect(service.googleAuth({ idToken: 'empty.token' })).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+    });
+
+    it('rejects when the payload is missing the sub claim', async () => {
+      mockGooglePayload({ sub: undefined });
+
+      await expect(service.googleAuth({ idToken: 'no.sub.token' })).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+    });
+
+    it('rejects when the payload is missing the email claim', async () => {
+      mockGooglePayload({ email: undefined });
+
+      await expect(service.googleAuth({ idToken: 'no.email.token' })).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+    });
+
+    it('verifies the token against both the web and iOS client IDs', async () => {
+      mockGooglePayload();
+      prisma.user.findUnique.mockResolvedValue(
+        buildUser({ googleId: 'google-sub', isGuest: false }),
+      );
+
+      await service.googleAuth({ idToken: 'good.token' });
+
+      expect(verifyIdToken).toHaveBeenCalledWith({
+        idToken: 'good.token',
+        audience: [
+          'web-client-id.apps.googleusercontent.com',
+          'ios-client-id.apps.googleusercontent.com',
+        ],
+      });
+    });
+
+    it('logs in a returning Google user, persisting only the rotated token hash', async () => {
+      mockGooglePayload();
+      const existing = buildUser({ id: 'gu-1', googleId: 'google-sub', isGuest: false });
+      prisma.user.findUnique.mockResolvedValueOnce(existing); // googleId lookup hits
+      prisma.user.update.mockResolvedValue(existing);
+
+      const result = await service.googleAuth({ idToken: 'good.token' });
+
+      // Only the token-hash persist write — no linking/upgrade update, no create.
+      expect(prisma.user.update).toHaveBeenCalledTimes(1);
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'gu-1' },
+        data: { refreshTokenHash: expect.any(String) },
+      });
+      expect(prisma.user.create).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        accessToken: 'access-token',
+        refreshToken: 'refresh-token',
+        user: { id: 'gu-1', email: 'ada@example.com', displayName: 'Ada', isGuest: false },
+      });
+    });
+
+    it('auto-links Google to an existing password account, preserving displayName and passwordHash', async () => {
+      mockGooglePayload({ name: 'Google Name' });
+      const passwordAccount = buildUser({
+        id: 'pw-1',
+        googleId: null,
+        passwordHash: 'existing-secret-hash',
+        displayName: 'Ada', // user-set; must NOT be overwritten by "Google Name"
+      });
+      prisma.user.findUnique
+        .mockResolvedValueOnce(null) // googleId lookup misses
+        .mockResolvedValueOnce(passwordAccount); // email lookup hits
+      prisma.user.update.mockResolvedValue(
+        buildUser({ id: 'pw-1', googleId: 'google-sub', passwordHash: 'existing-secret-hash' }),
+      );
+
+      await service.googleAuth({ idToken: 'good.token' });
+
+      const linkCall = prisma.user.update.mock.calls[0][0] as {
+        where: { id: string };
+        data: Record<string, unknown>;
+      };
+      expect(linkCall.where).toEqual({ id: 'pw-1' });
+      expect(linkCall.data.googleId).toBe('google-sub');
+      expect(linkCall.data.isGuest).toBe(false);
+      expect(linkCall.data.displayName).toBe('Ada'); // preserved, not "Google Name"
+      // passwordHash must be untouched by the link write.
+      expect(linkCall.data).not.toHaveProperty('passwordHash');
+      expect(prisma.user.create).not.toHaveBeenCalled();
+    });
+
+    it('backfills displayName from Google when the linked account had none', async () => {
+      mockGooglePayload({ name: 'Google Name' });
+      prisma.user.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(buildUser({ id: 'pw-2', googleId: null, displayName: null }));
+      prisma.user.update.mockResolvedValue(buildUser({ id: 'pw-2', googleId: 'google-sub' }));
+
+      await service.googleAuth({ idToken: 'good.token' });
+
+      const linkCall = prisma.user.update.mock.calls[0][0] as { data: Record<string, unknown> };
+      expect(linkCall.data.displayName).toBe('Google Name');
+    });
+
+    it('upgrades a guest in place via a valid guest bearer token, preserving XP', async () => {
+      mockGooglePayload();
+      prisma.user.findUnique
+        .mockResolvedValueOnce(null) // googleId lookup misses
+        .mockResolvedValueOnce(null) // email lookup misses
+        .mockResolvedValueOnce(
+          buildUser({
+            id: 'guest-1',
+            isGuest: true,
+            email: null,
+            googleId: null,
+            passwordHash: null,
+            displayName: null,
+            totalXp: 250, // pre-existing progress that must survive the upgrade
+            currentStreak: 4,
+          }),
+        );
+      prisma.user.update.mockResolvedValue(buildUser({ id: 'guest-1', isGuest: false }));
+      jwtService.verify.mockReturnValue({ sub: 'guest-1', isGuest: true, type: TokenType.Access });
+
+      await service.googleAuth({ idToken: 'good.token' }, 'Bearer guest-access-token');
+
+      // Single folded write (email + googleId + isGuest + fresh hash), no create.
+      expect(prisma.user.update).toHaveBeenCalledTimes(1);
+      const upgradeCall = prisma.user.update.mock.calls[0][0] as {
+        where: { id: string };
+        data: Record<string, unknown>;
+      };
+      expect(upgradeCall.where).toEqual({ id: 'guest-1' });
+      expect(upgradeCall.data.email).toBe('ada@example.com');
+      expect(upgradeCall.data.googleId).toBe('google-sub');
+      expect(upgradeCall.data.isGuest).toBe(false);
+      expect(upgradeCall.data.refreshTokenHash).toEqual(expect.any(String));
+      // XP/streak fields are never in the upgrade payload, so they carry over.
+      expect(upgradeCall.data).not.toHaveProperty('totalXp');
+      expect(upgradeCall.data).not.toHaveProperty('currentStreak');
+      expect(prisma.user.create).not.toHaveBeenCalled();
+    });
+
+    it('creates a brand-new Google account (passwordHash null) when nothing matches', async () => {
+      mockGooglePayload({ name: undefined }); // no Google name → displayName null
+      prisma.user.findUnique
+        .mockResolvedValueOnce(null) // googleId lookup misses
+        .mockResolvedValueOnce(null); // email lookup misses
+      prisma.user.create.mockResolvedValue(
+        buildUser({ id: 'new-1', googleId: 'google-sub', isGuest: false }),
+      );
+
+      await service.googleAuth({ idToken: 'good.token' });
+
+      expect(prisma.user.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          id: expect.any(String),
+          email: 'ada@example.com',
+          googleId: 'google-sub',
+          displayName: null,
+          isGuest: false,
+          passwordHash: null,
+          refreshTokenHash: expect.any(String),
+        }),
+      });
+      expect(prisma.user.update).not.toHaveBeenCalled();
+    });
+
+    it('falls back to creating an account when a guest bearer token no longer qualifies', async () => {
+      mockGooglePayload();
+      prisma.user.findUnique
+        .mockResolvedValueOnce(null) // googleId miss
+        .mockResolvedValueOnce(null) // email miss
+        .mockResolvedValueOnce(buildUser({ id: 'guest-1', isGuest: false })); // already upgraded
+      prisma.user.create.mockResolvedValue(buildUser({ id: 'new-1', googleId: 'google-sub' }));
+      jwtService.verify.mockReturnValue({ sub: 'guest-1', isGuest: true, type: TokenType.Access });
+
+      await service.googleAuth({ idToken: 'good.token' }, 'Bearer stale-guest-token');
+
+      expect(prisma.user.create).toHaveBeenCalled();
+    });
+
+    it('maps a concurrent-sign-in email unique-constraint race to UnauthorizedException, not 409', async () => {
+      mockGooglePayload();
+      prisma.user.findUnique
+        .mockResolvedValueOnce(null) // googleId miss
+        .mockResolvedValueOnce(null); // email miss
+      prisma.user.create.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+          code: 'P2002',
+          clientVersion: 'test',
+          meta: { target: ['email'] },
+        }),
+      );
+
+      await expect(service.googleAuth({ idToken: 'good.token' })).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+    });
+
+    it('re-throws a non-unique-constraint database error unchanged', async () => {
+      mockGooglePayload();
+      prisma.user.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(null);
+      const dbError = new Error('connection lost');
+      prisma.user.create.mockRejectedValue(dbError);
+
+      await expect(service.googleAuth({ idToken: 'good.token' })).rejects.toBe(dbError);
+    });
+
+    it('does not authenticate a soft-deleted googleId match, falling through to create a new account', async () => {
+      mockGooglePayload();
+      prisma.user.findUnique
+        .mockResolvedValueOnce(
+          buildUser({ id: 'gu-deleted', googleId: 'google-sub', deletedAt: new Date() }),
+        ) // googleId lookup hits but soft-deleted
+        .mockResolvedValueOnce(null); // email lookup misses
+      prisma.user.create.mockResolvedValue(
+        buildUser({ id: 'new-1', googleId: 'google-sub', isGuest: false }),
+      );
+
+      const result = await service.googleAuth({ idToken: 'good.token' });
+
+      expect(prisma.user.create).toHaveBeenCalled();
+      expect(result.user.id).toBe('new-1');
+    });
+
+    it('does not auto-link a soft-deleted email match, falling through to create a new account', async () => {
+      mockGooglePayload();
+      prisma.user.findUnique
+        .mockResolvedValueOnce(null) // googleId lookup misses
+        .mockResolvedValueOnce(buildUser({ id: 'pw-deleted', deletedAt: new Date() })); // email lookup hits but soft-deleted
+      prisma.user.create.mockResolvedValue(
+        buildUser({ id: 'new-1', googleId: 'google-sub', isGuest: false }),
+      );
+
+      const result = await service.googleAuth({ idToken: 'good.token' });
+
+      expect(prisma.user.update).not.toHaveBeenCalled();
+      expect(prisma.user.create).toHaveBeenCalled();
+      expect(result.user.id).toBe('new-1');
+    });
+
+    it('maps a concurrent-sign-in googleId unique-constraint race to UnauthorizedException, not a 500', async () => {
+      mockGooglePayload();
+      prisma.user.findUnique
+        .mockResolvedValueOnce(null) // googleId miss
+        .mockResolvedValueOnce(null); // email miss
+      prisma.user.create.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+          code: 'P2002',
+          clientVersion: 'test',
+          meta: { target: ['googleId'] },
+        }),
+      );
+
+      await expect(service.googleAuth({ idToken: 'good.token' })).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
     });
   });
 
