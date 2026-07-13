@@ -78,19 +78,20 @@ export class AdminService {
         // reversed: accurately unwinding streak state would require replaying
         // the user's full completion history (a rejected completion could sit
         // anywhere in a chain), which is out of scope for this v1 milestone.
-        const owner = await tx.user.findUnique({
-          where: { id: row.userId },
-          select: { totalXp: true },
-        });
-        const currentXp = owner?.totalXp ?? 0;
-        const newXp = Math.max(0, currentXp - row.xpAwarded);
-        await tx.user.update({
-          where: { id: row.userId },
-          data: { totalXp: newXp },
-        });
+        //
+        // Atomic SQL decrement, not a read-modify-write: a plain
+        // findUnique-then-update here would race a concurrent ProofService
+        // submission incrementing the same user's totalXp between the read and
+        // the write (READ COMMITTED doesn't lock the users row on a plain
+        // SELECT), silently discarding the concurrent grant. GREATEST(...) does
+        // the clamp-at-0 in the same statement as the decrement.
+        await tx.$executeRaw`
+          UPDATE users
+          SET "totalXp" = GREATEST(0, "totalXp" - ${row.xpAwarded})
+          WHERE id = ${row.userId}`;
         this.logger.log(
           `Completion ${completionId} rejected by admin; reversed ${row.xpAwarded} XP ` +
-            `for user ${row.userId} (${currentXp} -> ${newXp})`,
+            `for user ${row.userId}`,
         );
       } else {
         this.logger.log(`Completion ${completionId} approved by admin`);

@@ -61,12 +61,18 @@ export class UsersService {
   }
 
   /**
-   * Removes the user's avatar: deletes the S3 object and nulls User.avatarUrl.
-   * Idempotent — when no avatar is set this is a no-op that still returns the
-   * (avatar-less) profile with 200, never a 404, matching the project's
-   * save/unsave idempotency convention. The object delete is best-effort: even
-   * if S3 cleanup fails, the pointer is still nulled so the user's intent to
-   * remove the avatar is honored rather than leaving them unable to clear it.
+   * Removes the user's avatar: nulls User.avatarUrl, then best-effort deletes
+   * the S3 object. Idempotent — when no avatar is set this is a no-op that
+   * still returns the (avatar-less) profile with 200, never a 404, matching
+   * the project's save/unsave idempotency convention.
+   *
+   * DB pointer is nulled *before* the S3 delete, not after: if the delete
+   * happened first and the DB write then failed (e.g. a transient connection
+   * error), avatarUrl would keep pointing at a now-deleted object, and the
+   * next profile read would hand the client a presigned URL for a 404 — a
+   * real inconsistency window, not hypothetical. Nulling first means the
+   * worst case on an S3 failure is an orphaned object (logged, not
+   * user-visible), never a broken pointer.
    */
   async deleteAvatar(userId: string): Promise<UserProfileDto> {
     const existing = await this.prisma.user.findUnique({
@@ -78,15 +84,16 @@ export class UsersService {
     }
 
     if (existing.avatarUrl) {
+      const previousKey = existing.avatarUrl;
+      await this.prisma.user.update({ where: { id: userId }, data: { avatarUrl: null } });
       try {
-        await this.storage.deleteObject(existing.avatarUrl);
+        await this.storage.deleteObject(previousKey);
       } catch (error) {
         this.logger.warn(
-          `Failed to delete avatar object ${existing.avatarUrl} for user ${userId}: ` +
+          `Failed to delete avatar object ${previousKey} for user ${userId}: ` +
             (error instanceof Error ? error.message : 'unknown error'),
         );
       }
-      await this.prisma.user.update({ where: { id: userId }, data: { avatarUrl: null } });
       this.logger.log(`Avatar removed for user ${userId}`);
     }
 

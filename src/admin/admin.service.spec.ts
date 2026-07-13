@@ -9,8 +9,8 @@ const USER_ID = '66666666-6666-6666-6666-666666666666';
 
 interface TxMock {
   $queryRaw: jest.Mock;
+  $executeRaw: jest.Mock;
   completion: { update: jest.Mock };
-  user: { findUnique: jest.Mock; update: jest.Mock };
 }
 
 function lockedRow(overrides: Record<string, unknown> = {}) {
@@ -31,8 +31,8 @@ describe('AdminService', () => {
   beforeEach(() => {
     tx = {
       $queryRaw: jest.fn(),
+      $executeRaw: jest.fn().mockResolvedValue(undefined),
       completion: { update: jest.fn() },
-      user: { findUnique: jest.fn(), update: jest.fn().mockResolvedValue(undefined) },
     };
     prisma = {
       $transaction: jest.fn(async (cb: (t: TxMock) => Promise<unknown>) => cb(tx)),
@@ -83,7 +83,7 @@ describe('AdminService', () => {
           }),
         }),
       );
-      expect(tx.user.update).not.toHaveBeenCalled();
+      expect(tx.$executeRaw).not.toHaveBeenCalled();
       expect(result).toEqual({
         completionId: COMPLETION_ID,
         verificationStatus: VerificationStatus.Approved,
@@ -95,9 +95,8 @@ describe('AdminService', () => {
   });
 
   describe('rejection', () => {
-    it('sets Rejected with the reason and decrements the user XP by xpAwarded', async () => {
+    it('sets Rejected with the reason and issues an atomic clamped XP decrement', async () => {
       tx.$queryRaw.mockResolvedValue([lockedRow({ xpAwarded: 40 })]);
-      tx.user.findUnique.mockResolvedValue({ totalXp: 100 });
       tx.completion.update.mockResolvedValue({
         id: COMPLETION_ID,
         verificationStatus: VerificationStatus.Rejected,
@@ -119,16 +118,25 @@ describe('AdminService', () => {
           }),
         }),
       );
-      expect(tx.user.update).toHaveBeenCalledWith({
-        where: { id: USER_ID },
-        data: { totalXp: 60 },
-      });
+      // A single atomic SQL UPDATE, not a findUnique-then-update — a
+      // read-modify-write here would race a concurrent ProofService XP grant
+      // (see the code comment in admin.service.ts). GREATEST(...) does the
+      // clamp-at-0 in the same statement, so there's no separate "clamp" case
+      // to test at this layer — that's Postgres's job now, exercised by the
+      // e2e suite against a real database, not mockable at the unit level.
+      expect(tx.$executeRaw).toHaveBeenCalledTimes(1);
+      const [strings, ...values] = tx.$executeRaw.mock.calls[0] as [
+        TemplateStringsArray,
+        ...unknown[],
+      ];
+      expect(strings.join('')).toContain('GREATEST(0, "totalXp" - ');
+      expect(values).toContain(40);
+      expect(values).toContain(USER_ID);
       expect(result.rejectionReason).toBe('Blurry photo');
     });
 
     it('coerces a missing reason to null (defensive — the DTO normally guarantees one)', async () => {
       tx.$queryRaw.mockResolvedValue([lockedRow({ xpAwarded: 10 })]);
-      tx.user.findUnique.mockResolvedValue({ totalXp: 100 });
       tx.completion.update.mockResolvedValue({
         id: COMPLETION_ID,
         verificationStatus: VerificationStatus.Rejected,
@@ -146,50 +154,6 @@ describe('AdminService', () => {
           data: expect.objectContaining({ rejectionReason: null }),
         }),
       );
-    });
-
-    it('clamps the XP decrement at 0 (never negative)', async () => {
-      tx.$queryRaw.mockResolvedValue([lockedRow({ xpAwarded: 40 })]);
-      tx.user.findUnique.mockResolvedValue({ totalXp: 10 });
-      tx.completion.update.mockResolvedValue({
-        id: COMPLETION_ID,
-        verificationStatus: VerificationStatus.Rejected,
-        verifiedAt: new Date(),
-        verifiedBy: 'admin',
-        rejectionReason: 'Invalid',
-      });
-
-      await service.updateVerification(COMPLETION_ID, {
-        status: VerificationStatus.Rejected,
-        rejectionReason: 'Invalid',
-      });
-
-      expect(tx.user.update).toHaveBeenCalledWith({
-        where: { id: USER_ID },
-        data: { totalXp: 0 },
-      });
-    });
-
-    it('treats a missing owner as 0 XP and clamps at 0 (defensive)', async () => {
-      tx.$queryRaw.mockResolvedValue([lockedRow({ xpAwarded: 40 })]);
-      tx.user.findUnique.mockResolvedValue(null);
-      tx.completion.update.mockResolvedValue({
-        id: COMPLETION_ID,
-        verificationStatus: VerificationStatus.Rejected,
-        verifiedAt: new Date(),
-        verifiedBy: 'admin',
-        rejectionReason: 'Invalid',
-      });
-
-      await service.updateVerification(COMPLETION_ID, {
-        status: VerificationStatus.Rejected,
-        rejectionReason: 'Invalid',
-      });
-
-      expect(tx.user.update).toHaveBeenCalledWith({
-        where: { id: USER_ID },
-        data: { totalXp: 0 },
-      });
     });
   });
 

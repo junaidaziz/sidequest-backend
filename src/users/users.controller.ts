@@ -83,6 +83,10 @@ export class UsersController {
   @Delete()
   @HttpCode(HttpStatus.OK)
   @UseGuards(JwtAuthGuard)
+  // Matches the upload endpoint's tier — this also does an S3 write
+  // (DeleteObjectCommand), so it shouldn't be five times more permissive
+  // than upload under the global default.
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
   @ApiOperation({
     summary: "Remove the authenticated user's profile avatar — idempotent",
   })

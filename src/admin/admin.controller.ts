@@ -1,5 +1,6 @@
 import { Body, Controller, Param, ParseUUIDPipe, Patch, UseGuards } from '@nestjs/common';
 import { ApiHeader, ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { AdminGuard, ADMIN_KEY_HEADER } from '../auth/guards/admin.guard';
 import { AdminService } from './admin.service';
 import { UpdateVerificationDto } from './dto/update-verification.dto';
@@ -17,6 +18,9 @@ export class AdminController {
   constructor(private readonly adminService: AdminService) {}
 
   @Patch(':id/verification')
+  // Bounds automated abuse if the shared admin key is ever compromised —
+  // legitimate dashboard use is nowhere near this rate.
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @ApiParam({ name: 'id', format: 'uuid', description: 'Completion id.' })
   @ApiOperation({ summary: 'Manually approve or reject a Pending completion' })
   @ApiResponse({ status: 200, type: VerificationResponseDto })
