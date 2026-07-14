@@ -5,6 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { VerificationQueueService } from '../verification/verification-queue.service';
 import { ReferralsService } from '../referrals/referrals.service';
+import { IdempotencyService, IdempotentRunParams } from '../idempotency/idempotency.service';
 import { ProofService } from './proof.service';
 
 interface TxMock {
@@ -82,6 +83,7 @@ describe('ProofService', () => {
   let storage: StorageMock;
   let verificationQueue: VerificationQueueMock;
   let referrals: { recordCompletionIfQualifying: jest.Mock };
+  let idempotency: { run: jest.Mock };
 
   beforeEach(async () => {
     tx = {
@@ -106,6 +108,11 @@ describe('ProofService', () => {
     referrals = {
       recordCompletionIfQualifying: jest.fn().mockResolvedValue(undefined),
     };
+    // Idempotency wrapper is transparent in unit tests: run the operation
+    // straight through so the existing behavioural assertions still apply.
+    idempotency = {
+      run: jest.fn((p: IdempotentRunParams<unknown>) => p.execute()),
+    };
 
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
@@ -114,6 +121,7 @@ describe('ProofService', () => {
         { provide: StorageService, useValue: storage },
         { provide: VerificationQueueService, useValue: verificationQueue },
         { provide: ReferralsService, useValue: referrals },
+        { provide: IdempotencyService, useValue: idempotency },
       ],
     }).compile();
 
@@ -454,6 +462,71 @@ describe('ProofService', () => {
         service.submitProof(USER_ID, MISSION_ID, undefined, 'caption'),
       ).rejects.toBeDefined();
       expect(referrals.recordCompletionIfQualifying).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('idempotency guard (Decision 9 / M23.4)', () => {
+    it('routes the submission through IdempotencyService with the supplied key and a mission-scoped endpoint', async () => {
+      stubHappyTransaction();
+
+      await service.submitProof(USER_ID, MISSION_ID, undefined, 'caption', 'idem-key-1');
+
+      expect(idempotency.run).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: USER_ID,
+          key: 'idem-key-1',
+          endpoint: `POST /missions/${MISSION_ID}/proof`,
+        }),
+      );
+    });
+
+    it('scopes two different missions to two different endpoint strings (regression: a reused key must not cross missions)', async () => {
+      // An earlier version of this scope string was a bare, non-interpolated
+      // literal — a client reusing one idempotency key across two different
+      // missions would have the second mission's submission silently
+      // short-circuited to the first mission's stored response. Interpolating
+      // missionId is what makes that impossible: the two calls below hit
+      // different (userId, key, endpoint) triples even with the same key.
+      stubHappyTransaction();
+      const otherMissionId = '22222222-2222-2222-2222-222222222222';
+
+      await service.submitProof(USER_ID, MISSION_ID, undefined, 'caption', 'shared-key');
+      await service.submitProof(USER_ID, otherMissionId, undefined, 'caption', 'shared-key');
+
+      const endpoints = idempotency.run.mock.calls.map((call) => call[0].endpoint);
+      expect(endpoints).toEqual([
+        `POST /missions/${MISSION_ID}/proof`,
+        `POST /missions/${otherMissionId}/proof`,
+      ]);
+      expect(endpoints[0]).not.toBe(endpoints[1]);
+    });
+
+    it('passes an undefined key straight through (no-dedupe path) when none is supplied', async () => {
+      stubHappyTransaction();
+
+      await service.submitProof(USER_ID, MISSION_ID, undefined, 'caption');
+
+      expect(idempotency.run).toHaveBeenCalledWith(expect.objectContaining({ key: undefined }));
+    });
+
+    it('returns the stored response verbatim without re-executing on an idempotency hit', async () => {
+      const stored = {
+        completionId: 'stored-1',
+        missionTitle: 'Cached',
+        xpAwarded: 40,
+        totalXp: 40,
+        currentStreak: 1,
+        longestStreak: 1,
+        proofUrl: null,
+      };
+      idempotency.run.mockResolvedValueOnce(stored);
+
+      const result = await service.submitProof(USER_ID, MISSION_ID, undefined, 'caption', 'k');
+
+      expect(result).toBe(stored);
+      // The real write never ran — no mission lookup, no transaction.
+      expect(prisma.mission.findUnique).not.toHaveBeenCalled();
+      expect(prisma.$transaction).not.toHaveBeenCalled();
     });
   });
 });

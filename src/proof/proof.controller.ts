@@ -17,6 +17,7 @@ import {
   ApiBearerAuth,
   ApiBody,
   ApiConsumes,
+  ApiHeader,
   ApiOperation,
   ApiParam,
   ApiResponse,
@@ -25,6 +26,10 @@ import {
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AuthUser } from '../auth/types/jwt-payload.interface';
+import {
+  IDEMPOTENCY_KEY_HEADER,
+  IdempotencyKeyHeader,
+} from '../idempotency/idempotency-key.decorator';
 import { ALLOWED_IMAGE_MIME_TYPES, MAX_PROOF_PHOTO_BYTES } from '../storage/storage.service';
 import { ProofResponseDto } from './dto/proof-response.dto';
 import { SubmitProofDto } from './dto/submit-proof.dto';
@@ -47,6 +52,16 @@ export function imageFileFilter(
   cb(new BadRequestException('UNSUPPORTED_IMAGE_TYPE'), false);
 }
 
+/** Shared Swagger doc for the optional idempotency header (mirrors TasksController). */
+const IDEMPOTENCY_API_HEADER = {
+  name: IDEMPOTENCY_KEY_HEADER,
+  required: false,
+  description:
+    'Optional client-generated key (UUID). Reusing it on a retry returns the ' +
+    'original response verbatim instead of re-executing the submission — the ' +
+    "offline write-queue sends one so a replayed proof submit can't double-award XP.",
+} as const;
+
 @ApiTags('proof')
 @ApiBearerAuth()
 @Controller('missions/:missionId/proof')
@@ -66,6 +81,7 @@ export class ProofController {
     }),
   )
   @ApiConsumes('multipart/form-data')
+  @ApiHeader(IDEMPOTENCY_API_HEADER)
   @ApiParam({ name: 'missionId', format: 'uuid' })
   @ApiOperation({
     summary: 'Submit photo or text proof for a mission, awarding XP and updating the streak',
@@ -107,12 +123,23 @@ export class ProofController {
   })
   @ApiResponse({ status: 404, description: 'Mission not found or inactive' })
   @ApiResponse({ status: 413, description: 'Photo exceeds the 10MB limit' })
+  @ApiResponse({
+    status: 409,
+    description: 'A request with this Idempotency-Key is already in progress — retry shortly',
+  })
   submit(
     @CurrentUser() user: AuthUser,
     @Param('missionId', ParseUUIDPipe) missionId: string,
     @UploadedFile() photo: Express.Multer.File | undefined,
     @Body() dto: SubmitProofDto,
+    @IdempotencyKeyHeader() idempotencyKey: string | undefined,
   ): Promise<ProofResponseDto> {
-    return this.proofService.submitProof(user.userId, missionId, photo, dto.caption);
+    return this.proofService.submitProof(
+      user.userId,
+      missionId,
+      photo,
+      dto.caption,
+      idempotencyKey,
+    );
   }
 }

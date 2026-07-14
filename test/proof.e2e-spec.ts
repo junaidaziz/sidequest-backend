@@ -138,6 +138,38 @@ describe('Proof submission (e2e)', () => {
       expect(completion?.proofKey).toBeNull();
     });
 
+    it('dedupes a replayed proof submission sharing an Idempotency-Key (M23.4)', async () => {
+      const { token, userId } = await createGuest();
+      const key = `e2e-proof-key-${Date.now()}`;
+
+      const first = await request(app.getHttpServer())
+        .post(`/missions/${missionId}/proof`)
+        .set('Authorization', `Bearer ${token}`)
+        .set('Idempotency-Key', key)
+        .field('caption', 'Queued while offline, replayed on reconnect')
+        .expect(201);
+
+      // The replay would normally trip GUEST_COMPLETION_LIMIT_REACHED (403) or
+      // double-award XP; with the same key it returns the original 201 verbatim.
+      const second = await request(app.getHttpServer())
+        .post(`/missions/${missionId}/proof`)
+        .set('Authorization', `Bearer ${token}`)
+        .set('Idempotency-Key', key)
+        .field('caption', 'Queued while offline, replayed on reconnect')
+        .expect(201);
+
+      expect(second.body.completionId).toBe(first.body.completionId);
+      expect(second.body.totalXp).toBe(first.body.totalXp);
+
+      // Exactly one completion row and no double XP.
+      const completions = await prisma.completion.count({ where: { userId } });
+      expect(completions).toBe(1);
+      const user = await prisma.user.findUnique({ where: { id: userId } });
+      expect(user?.totalXp).toBe(40);
+
+      await prisma.idempotencyKey.deleteMany({ where: { userId } });
+    });
+
     it('blocks a guest from a second completion with GUEST_COMPLETION_LIMIT_REACHED', async () => {
       const { token } = await createGuest();
 

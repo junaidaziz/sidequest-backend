@@ -43,13 +43,14 @@ describe('ProofController', () => {
   it('forwards a text-proof submission to the service and returns its result', async () => {
     const dto: SubmitProofDto = { caption: 'Found it!' };
 
-    const result = await controller.submit(AUTH_USER, MISSION_ID, undefined, dto);
+    const result = await controller.submit(AUTH_USER, MISSION_ID, undefined, dto, undefined);
 
     expect(service.submitProof).toHaveBeenCalledWith(
       AUTH_USER.userId,
       MISSION_ID,
       undefined,
       'Found it!',
+      undefined,
     );
     expect(result).toEqual(response());
   });
@@ -58,13 +59,28 @@ describe('ProofController', () => {
     const photo = { mimetype: 'image/png', buffer: Buffer.from('x') } as Express.Multer.File;
     const dto: SubmitProofDto = {};
 
-    await controller.submit(AUTH_USER, MISSION_ID, photo, dto);
+    await controller.submit(AUTH_USER, MISSION_ID, photo, dto, undefined);
 
     expect(service.submitProof).toHaveBeenCalledWith(
       AUTH_USER.userId,
       MISSION_ID,
       photo,
       undefined,
+      undefined,
+    );
+  });
+
+  it('threads the Idempotency-Key header through to the service', async () => {
+    const dto: SubmitProofDto = { caption: 'Found it!' };
+
+    await controller.submit(AUTH_USER, MISSION_ID, undefined, dto, 'idem-key-42');
+
+    expect(service.submitProof).toHaveBeenCalledWith(
+      AUTH_USER.userId,
+      MISSION_ID,
+      undefined,
+      'Found it!',
+      'idem-key-42',
     );
   });
 

@@ -10,11 +10,27 @@ import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { VerificationQueueService } from '../verification/verification-queue.service';
 import { ReferralsService } from '../referrals/referrals.service';
+import { IdempotencyService } from '../idempotency/idempotency.service';
 import { ProofResponseDto } from './dto/proof-response.dto';
 import { computeStreak } from './streak.util';
 
 /** Machine-readable reason the mobile client keys off to show the signup gate. */
 const GUEST_LIMIT_REASON = 'GUEST_COMPLETION_LIMIT_REACHED';
+
+/**
+ * Dedupe scope prefix for proof submissions (Decision 9 / M23.4) — the actual
+ * scope string interpolates `missionId`, matching every other path-
+ * parameterized idempotent endpoint in this codebase (TasksService's
+ * `submitEvidence`/`acceptInvite`/`declineInvite` all interpolate their path
+ * param into the scope string). An earlier version of this constant used a
+ * bare literal citing `POST /tasks` (which has no path param) as precedent —
+ * wrong precedent: without interpolation, a client that accidentally reused
+ * one idempotency key across two different missions would have the second
+ * mission's submission silently short-circuited to the first mission's
+ * stored response (wrong completionId/XP returned, no completion created for
+ * the second mission) — found by independent review.
+ */
+const PROOF_ENDPOINT_PREFIX = 'POST /missions';
 
 @Injectable()
 export class ProofService {
@@ -25,13 +41,39 @@ export class ProofService {
     private readonly storage: StorageService,
     private readonly verificationQueue: VerificationQueueService,
     private readonly referrals: ReferralsService,
+    private readonly idempotency: IdempotencyService,
   ) {}
 
   /**
    * Records a mission completion from a photo or text proof, then awards XP and
    * updates the streak atomically. Exactly one of `photo`/`caption` must be set.
+   *
+   * A naive retry of this endpoint (offline write-queue replay, M23.4) would
+   * otherwise double-award XP and duplicate the completion when the first
+   * attempt actually succeeded server-side but its response never reached the
+   * client. Threading the optional client-generated `idempotencyKey` through
+   * IdempotencyService makes the whole side-effecting operation
+   * reserve-then-execute: a repeat call with the same key returns the original
+   * response verbatim instead of re-running the upload + XP grant. With no key
+   * the behaviour is unchanged (runs unconditionally, no dedupe bookkeeping).
    */
-  async submitProof(
+  submitProof(
+    userId: string,
+    missionId: string,
+    photo?: Express.Multer.File,
+    caption?: string,
+    idempotencyKey?: string,
+  ): Promise<ProofResponseDto> {
+    return this.idempotency.run({
+      userId,
+      key: idempotencyKey,
+      endpoint: `${PROOF_ENDPOINT_PREFIX}/${missionId}/proof`,
+      execute: () => this.executeSubmitProof(userId, missionId, photo, caption),
+    });
+  }
+
+  /** The actual completion write, wrapped by `submitProof`'s idempotency guard. */
+  private async executeSubmitProof(
     userId: string,
     missionId: string,
     photo?: Express.Multer.File,
