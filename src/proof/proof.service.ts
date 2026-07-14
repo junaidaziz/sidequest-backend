@@ -9,6 +9,7 @@ import { ProofType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { VerificationQueueService } from '../verification/verification-queue.service';
+import { ReferralsService } from '../referrals/referrals.service';
 import { ProofResponseDto } from './dto/proof-response.dto';
 import { computeStreak } from './streak.util';
 
@@ -23,6 +24,7 @@ export class ProofService {
     private readonly prisma: PrismaService,
     private readonly storage: StorageService,
     private readonly verificationQueue: VerificationQueueService,
+    private readonly referrals: ReferralsService,
   ) {}
 
   /**
@@ -154,6 +156,30 @@ export class ProofService {
     } catch (error) {
       this.logger.error(
         `Failed to enqueue auto-approval for completion ${completion.id}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+    }
+
+    // Best-effort referral hook (M20): a referee's first completion — from this
+    // curated-mission path or the peer-task path — qualifies their referral's
+    // reward. Never let a referral-side failure undo an already-recorded
+    // completion, matching the queue-enqueue try/catch above.
+    //
+    // KNOWN GAP (backend-eval WARN-4, 2026-07-14): this fires here at
+    // submission time (verificationStatus still Pending), mirroring how XP is
+    // granted optimistically on submission — but unlike XP, which is reversed
+    // via AdminService's GREATEST(0, totalXp - xpAwarded) path on a later
+    // rejection, a referral reward already granted here is NOT reversed if
+    // this completion is subsequently rejected. TasksService's hook, by
+    // contrast, only fires on actual approval. Left as-is pending a decision
+    // on whether to add reward-reversal to the rejection path or move this
+    // hook to fire on approval instead (matching TasksService) — flagging
+    // rather than silently picking one.
+    try {
+      await this.referrals.recordCompletionIfQualifying(userId);
+    } catch (error) {
+      this.logger.error(
+        `Referral completion hook failed for user ${userId}`,
         error instanceof Error ? error.stack : undefined,
       );
     }

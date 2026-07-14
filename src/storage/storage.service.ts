@@ -80,6 +80,17 @@ export class StorageService {
   }
 
   /**
+   * Builds a namespaced, collision-free object key for a user-task evidence
+   * attachment (M19). Namespaced under `task-attachments/` so peer-to-peer task
+   * evidence never shares a prefix with curated mission proofs or avatars, while
+   * reusing the exact same allow-list/extension convention as those. Same
+   * authoritative MIME allow-list check as proofs — the storage layer owns it.
+   */
+  buildTaskAttachmentKey(userId: string, contentType: string): string {
+    return this.buildObjectKey('task-attachments', userId, contentType);
+  }
+
+  /**
    * Shared key builder for every per-user image object. Keeps the folder prefix
    * a parameter so proofs and avatars never hardcode each other's namespace, and
    * the allow-list/extension check lives in exactly one place.

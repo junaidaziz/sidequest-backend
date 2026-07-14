@@ -7,6 +7,8 @@ import { createHash, randomUUID } from 'crypto';
 import { OAuth2Client } from 'google-auth-library';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
+import { ReferralsService } from '../referrals/referrals.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { AuthResponseDto } from './dto/auth-response.dto';
 import { AuthTokensDto } from './dto/auth-tokens.dto';
 import { GoogleAuthDto } from './dto/google-auth.dto';
@@ -62,6 +64,8 @@ export class AuthService {
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
     private readonly storage: StorageService,
+    private readonly referrals: ReferralsService,
+    private readonly notifications: NotificationsService,
     config: ConfigService,
   ) {
     this.jwtSecret = config.getOrThrow<string>('JWT_SECRET');
@@ -95,8 +99,14 @@ export class AuthService {
       throw new ConflictException('Email already registered');
     }
 
-    const passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
     const guestUserId = this.resolveGuestUserId(bearerToken);
+    // Validate any referral code BEFORE the account write (M20.3) so an invalid
+    // code is a clean 400 with no half-created account. Self-referral is
+    // rejected here when the referee (the guest being upgraded) is known.
+    const referrerId = dto.referralCode
+      ? await this.referrals.resolveReferrer(dto.referralCode, guestUserId ?? undefined)
+      : null;
+    const passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
 
     try {
       if (guestUserId) {
@@ -119,6 +129,7 @@ export class AuthService {
             },
           });
           this.logger.log(`Guest ${guest.id} upgraded to full account`);
+          await this.attributeReferral(referrerId, dto.referralCode, upgraded.id);
           return { accessToken, refreshToken, user: await this.toProfile(upgraded) };
         }
       }
@@ -136,6 +147,7 @@ export class AuthService {
         },
       });
       this.logger.log(`New account created: ${id}`);
+      await this.attributeReferral(referrerId, dto.referralCode, created.id);
       return { accessToken, refreshToken, user: await this.toProfile(created) };
     } catch (error) {
       // Backstop for the race between the uniqueness pre-check and the write:
@@ -158,6 +170,17 @@ export class AuthService {
    */
   async googleAuth(dto: GoogleAuthDto, bearerToken?: string): Promise<AuthResponseDto> {
     const { sub, email, displayName } = await this.verifyGoogleIdToken(dto.idToken);
+
+    // Validate any referral code up front (M20.3): an invalid code is a 400
+    // regardless of the sign-in outcome. It is only *attributed* below when this
+    // sign-in creates a new account or upgrades a guest — never for a returning
+    // user or an auto-linked existing account (they already registered).
+    const referrerId = dto.referralCode
+      ? await this.referrals.resolveReferrer(
+          dto.referralCode,
+          this.resolveGuestUserId(bearerToken) ?? undefined,
+        )
+      : null;
 
     // 1. Returning Google user — the googleId is the stable identity. isGuest is
     // never true on such a row (only step 2/3 set googleId and both clear it),
@@ -220,6 +243,7 @@ export class AuthService {
             },
           });
           this.logger.log(`Guest ${guest.id} upgraded to full account via Google`);
+          await this.attributeReferral(referrerId, dto.referralCode, upgraded.id);
           return { accessToken, refreshToken, user: await this.toProfile(upgraded) };
         }
       }
@@ -239,6 +263,7 @@ export class AuthService {
         },
       });
       this.logger.log(`New account created via Google: ${id}`);
+      await this.attributeReferral(referrerId, dto.referralCode, created.id);
       return { accessToken, refreshToken, user: await this.toProfile(created) };
     } catch (error) {
       // Backstop for the race between the read-checks above and the write: a
@@ -314,12 +339,28 @@ export class AuthService {
    * confirmed the row exists and is not soft-deleted), so a plain update is safe;
    * re-nulling an already-null hash is a no-op that still returns success.
    */
-  async logout(userId: string): Promise<LogoutResponseDto> {
+  async logout(userId: string, pushToken?: string): Promise<LogoutResponseDto> {
     await this.prisma.user.update({
       where: { id: userId },
       data: { refreshTokenHash: null },
     });
     this.logger.log(`Refresh token revoked on logout: ${userId}`);
+
+    // M21.3 — deregister the device's push token so a shared device stops
+    // receiving this user's pushes after logout, matching the rigor of the
+    // refresh-token revocation above. Isolated in its own try/catch so a
+    // notification-side failure can never turn a successful logout into a 500
+    // (the same isolation the referral/notification hooks use elsewhere).
+    if (pushToken) {
+      try {
+        await this.notifications.deregisterPushToken(userId, pushToken);
+      } catch (error) {
+        this.logger.error(
+          `Push-token deregistration failed on logout for user ${userId}`,
+          error instanceof Error ? error.stack : undefined,
+        );
+      }
+    }
     return { success: true };
   }
 
@@ -387,6 +428,40 @@ export class AuthService {
       data: { refreshTokenHash },
     });
     return { accessToken, refreshToken };
+  }
+
+  /**
+   * Records a referral conversion once the referee's account exists (M20.3).
+   * The code was already validated up front by `resolveReferrer`, so
+   * `referrerId` is trusted here; a no-op when no code was supplied. Delegates
+   * the (idempotent) write to ReferralsService so all referral persistence
+   * stays in one module.
+   *
+   * Isolated in its own try/catch — mirroring the same isolation
+   * ProofService/TasksService apply around their ReferralsService calls — so
+   * a transient failure here (e.g. a dropped DB connection) can never turn
+   * into a 500 for a signup/googleAuth call whose account write has *already
+   * committed*. Without this, the caller's outer catch would see a non-P2002
+   * error, rethrow it as a 500, and leave the user with a real account they
+   * can't re-signup into (email now taken) and a permanently unattributed
+   * referral — worse than just logging and moving on.
+   */
+  private async attributeReferral(
+    referrerId: string | null,
+    code: string | undefined,
+    refereeId: string,
+  ): Promise<void> {
+    if (!referrerId || !code) {
+      return;
+    }
+    try {
+      await this.referrals.attributeSignup({ refereeId, referrerId, code });
+    } catch (error) {
+      this.logger.error(
+        `Referral attribution failed for referee ${refereeId} (code ${code})`,
+        error instanceof Error ? error.stack : error,
+      );
+    }
   }
 
   /**

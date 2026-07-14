@@ -16,6 +16,7 @@ import { CurrentUser } from './decorators/current-user.decorator';
 import { AuthResponseDto } from './dto/auth-response.dto';
 import { GoogleAuthDto } from './dto/google-auth.dto';
 import { LoginDto } from './dto/login.dto';
+import { LogoutDto } from './dto/logout.dto';
 import { LogoutResponseDto } from './dto/logout-response.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { SignupDto } from './dto/signup.dto';
@@ -122,13 +123,16 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @ApiBearerAuth()
   @ApiOperation({
-    summary: "Revoke the caller's server-side refresh token (invalidates future /auth/refresh)",
+    summary:
+      "Revoke the caller's server-side refresh token (invalidates future /auth/refresh) " +
+      'and, if a push token is supplied, deregister it for this device.',
   })
   @ApiResponse({ status: 200, type: LogoutResponseDto })
+  @ApiResponse({ status: 400, description: 'Validation failed' })
   @ApiResponse({ status: 401, description: 'Missing or invalid access token' })
   @ApiResponse({ status: 429, description: 'Too many requests' })
-  logout(@CurrentUser() user: AuthUser): Promise<LogoutResponseDto> {
-    return this.authService.logout(user.userId);
+  logout(@CurrentUser() user: AuthUser, @Body() dto: LogoutDto): Promise<LogoutResponseDto> {
+    return this.authService.logout(user.userId, dto.pushToken);
   }
 
   @Get('me')

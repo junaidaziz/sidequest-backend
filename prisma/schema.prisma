@@ -50,6 +50,31 @@ model User {
   completions  Completion[]
   savedMissions SavedMission[]
 
+  /// Peer-to-peer user-created tasks (M19). Additive back-relations only —
+  /// no existing User field is touched by the tasks feature.
+  createdTasks        UserTask[]           @relation("TaskCreator")
+  assignedTasks       UserTask[]           @relation("TaskAssignee")
+  taskSubmissions     UserTaskSubmission[] @relation("Submitter")
+  reviewedSubmissions UserTaskSubmission[] @relation("SubmissionReviewer")
+  taskEvents          UserTaskEvent[]
+  idempotencyKeys     IdempotencyKey[]
+
+  /// Invite Friends / Referrals (M20). Additive back-relations only — no
+  /// existing User field is touched by the referrals feature. A user owns at
+  /// most one ReferralCode and can be the referee of at most one Referral
+  /// (refereeId is @unique), but may be the referrer of many.
+  referralCode        ReferralCode?
+  referralsMade       Referral[]       @relation("Referrer")
+  referralReceived    Referral?        @relation("Referee")
+  referralRewards     ReferralReward[]
+
+  /// Notifications (M21). Additive back-relations only — no existing User field
+  /// is touched. A user has many in-app notifications and may register several
+  /// device push tokens (one per device), but has at most one preference row.
+  notifications          Notification[]
+  pushTokens             PushToken[]
+  notificationPreference NotificationPreference?
+
   @@map("users")
 }
 
@@ -173,4 +198,284 @@ model Completion {
   @@index([userId])
   @@index([verificationStatus])
   @@map("completions")
+}
+
+// ---------------------------------------------------------------------------
+// M19 — Peer-to-peer user-created tasks. A separate domain that does not touch
+// Mission/Completion or the curated-proof verification workflow above.
+// ---------------------------------------------------------------------------
+
+/// How a UserTask's completion is verified. `AUTOMATIC` is reserved and not
+/// implemented in v1. `CREATOR_APPROVAL` requires an assignee to complete the
+/// task (the creator reviews someone else's evidence) — a self-completion
+/// (assignee-less) submission with this method is rejected server-side
+/// (Decision 2, enforced at the submission boundary in TasksService).
+enum TaskVerificationMethod {
+  NONE
+  SELF
+  CREATOR_APPROVAL
+  AUTOMATIC
+}
+
+/// Lifecycle of a UserTask.
+enum UserTaskStatus {
+  Open      // no assignee yet (personal task, or shared task pre-invite)
+  Invited   // invite link generated, awaiting the friend's accept/decline
+  Accepted  // assignee bound, task active
+  Declined  // invite declined; the creator can re-invite
+  Submitted // evidence submitted, awaiting CREATOR_APPROVAL review
+  Approved
+  Rejected  // assignee may resubmit (a new UserTaskSubmission row)
+  Cancelled
+}
+
+/// Status of an individual evidence submission.
+enum TaskSubmissionStatus {
+  Submitted
+  Approved
+  Rejected
+}
+
+model UserTask {
+  id                 String                 @id @default(uuid())
+  creatorId          String
+  creator            User                   @relation("TaskCreator", fields: [creatorId], references: [id])
+  assigneeId         String? // null = personal/self-completion task
+  assignee           User?                  @relation("TaskAssignee", fields: [assigneeId], references: [id])
+  title              String
+  description        String?
+  rewardXp           Int? // optional; feeds User.totalXp on approval (Decision 3)
+  verificationMethod TaskVerificationMethod @default(NONE)
+  evidenceRequired   Boolean                @default(false)
+  status             UserTaskStatus         @default(Open)
+  inviteToken        String?                @unique
+  dueAt              DateTime?
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+  deletedAt          DateTime?
+
+  submissions        UserTaskSubmission[]
+  events             UserTaskEvent[]
+
+  @@index([creatorId])
+  @@index([assigneeId])
+  @@index([status])
+}
+
+model UserTaskSubmission {
+  id              String               @id @default(uuid())
+  taskId          String
+  task            UserTask             @relation(fields: [taskId], references: [id])
+  submittedById   String
+  submittedBy     User                 @relation("Submitter", fields: [submittedById], references: [id])
+  notes           String?
+  status          TaskSubmissionStatus @default(Submitted)
+  submittedAt     DateTime             @default(now())
+  reviewedAt      DateTime?
+  reviewedById    String?
+  reviewedBy      User?                @relation("SubmissionReviewer", fields: [reviewedById], references: [id])
+  rejectionReason String?
+
+  attachments     UserTaskAttachment[]
+
+  @@index([taskId])
+  @@index([submittedById])
+}
+
+model UserTaskAttachment {
+  id           String             @id @default(uuid())
+  submissionId String
+  submission   UserTaskSubmission @relation(fields: [submissionId], references: [id])
+  kind         String // "photo" | "document" — string, not enum: evidence types vary
+  objectKey    String // S3 key, resolved to a presigned GET at read time (same as Completion.proofKey)
+  createdAt    DateTime           @default(now())
+
+  @@index([submissionId])
+}
+
+/// Audit trail + the natural trigger source for M21 notifications.
+model UserTaskEvent {
+  id        String   @id @default(uuid())
+  taskId    String
+  task      UserTask @relation(fields: [taskId], references: [id])
+  actorId   String
+  actor     User     @relation(fields: [actorId], references: [id])
+  type      String // "created"|"invited"|"accepted"|"declined"|"submitted"|"approved"|"rejected"|"resubmitted"|"cancelled"
+  createdAt DateTime @default(now())
+
+  @@index([taskId])
+}
+
+/// Cross-cutting request-deduplication table (Decision 9). On the first
+/// execution of an idempotent mutation the caller's `Idempotency-Key` header,
+/// the endpoint identity, and the serialized response body are stored; a repeat
+/// call with the same key returns the stored response verbatim instead of
+/// re-executing. Scoped minimally for M19 — a shared IdempotencyService other
+/// milestones can reuse, keyed per (user, key, endpoint).
+model IdempotencyKey {
+  id           String   @id @default(uuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id])
+  key          String
+  endpoint     String
+  responseBody Json
+  createdAt    DateTime @default(now())
+
+  @@unique([userId, key, endpoint])
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// M20 — Invite Friends / Referrals. A user-acquisition domain, deliberately a
+// separate data model from M19's task-invite mechanism (Decision 1). Granted
+// rewards feed the same User.totalXp field curated missions and tasks already
+// use (Decision 3, one currency); the qualifying trigger is the referee's
+// first approved completion, not registration alone (Decision 4).
+// ---------------------------------------------------------------------------
+
+/// One code per user, generated lazily on the first GET /referrals/me and
+/// collision-checked with retry. The userId unique constraint is what makes
+/// two concurrent first-ever calls converge on a single code (the loser of the
+/// create race re-reads this row rather than minting a second code).
+model ReferralCode {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id])
+  code      String   @unique
+  createdAt DateTime @default(now())
+}
+
+enum ReferralStatus {
+  Pending   // registered (or invited), reward-qualifying event not yet met
+  Completed // referee's first completion met the rule; reward granted
+  Expired
+}
+
+/// Two shapes of row share this model:
+///  1. Conversion rows (refereeId set) — a real referral: someone registered
+///     via a referrer's code. These move Pending -> Completed and carry a reward.
+///  2. Invite-sent rows (refereeId null, invitedVia set) — best-effort share
+///     analytics recorded by POST /referrals/invites, no reward path.
+model Referral {
+  id           String         @id @default(uuid())
+  referrerId   String
+  referrer     User           @relation("Referrer", fields: [referrerId], references: [id])
+  refereeId    String?        @unique // set once the invited person registers; null while only invited
+  referee      User?          @relation("Referee", fields: [refereeId], references: [id])
+  code         String // denormalized code-at-time-of-signup, for audit even if the code later changes
+  status       ReferralStatus @default(Pending)
+  invitedVia   String? // "whatsapp"|"telegram"|"messages"|"email"|"facebook"|"x"|"copy_link" — best-effort analytics
+  registeredAt DateTime?
+  completedAt  DateTime?
+  createdAt    DateTime       @default(now())
+
+  reward       ReferralReward?
+
+  @@index([referrerId])
+  @@index([refereeId])
+}
+
+/// A granted reward. `referralId` is unique so a referral can be rewarded at
+/// most once — the second safety net (beyond the FOR UPDATE lock in
+/// ReferralService) against a double grant under concurrent completions.
+model ReferralReward {
+  id         String   @id @default(uuid())
+  referralId String   @unique
+  referral   Referral @relation(fields: [referralId], references: [id])
+  userId     String // recipient — the referrer, who earns the reward when their referee first completes
+  user       User     @relation(fields: [userId], references: [id])
+  type       String // "xp" for v1 (Decision 3); other currencies reserved
+  amount     Int?
+  grantedAt  DateTime @default(now())
+}
+
+/// Backend-configurable reward rules (a DB table, not env vars, so ops can
+/// change amounts/triggers without a deploy). No admin UI is scoped for v1
+/// (Decision 5) — rows are managed via Prisma Studio / direct DB access. The
+/// seed provisions exactly one active rule: on_referee_first_completion / xp.
+model ReferralRewardRule {
+  id           String   @id @default(uuid())
+  trigger      String // e.g. "on_referee_first_completion" (Decision 4)
+  rewardType   String // "xp" for v1 (Decision 3)
+  rewardAmount Int
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// M21 — Notifications (push + in-app). Loosely coupled to M19 tasks / M20
+// referrals: the triggering domain is captured only by `type` and the
+// free-form `data` deep-link payload, never a hard FK, so this model has no
+// dependency on UserTask/Referral and can be migrated independently.
+// ---------------------------------------------------------------------------
+
+/// The kind of event a Notification represents. Drives the mobile icon/copy and
+/// maps to a NotificationPreference category (task_* -> taskEventsEnabled,
+/// referral_* -> referralEventsEnabled, account_event -> accountEventsEnabled)
+/// the push processor honours before delivering.
+enum NotificationType {
+  task_assigned
+  task_accepted
+  task_declined
+  task_submitted
+  task_approved
+  task_rejected
+  referral_registered
+  referral_reward_earned
+  account_event
+}
+
+/// One in-app notification row per recipient per event. Always written
+/// synchronously by NotificationsService.notify(); push delivery is a
+/// best-effort side effect enqueued separately. `readAt` null means unread —
+/// the unread-count badge and mark-read endpoints key off exactly this.
+model Notification {
+  id        String           @id @default(uuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id])
+  type      NotificationType
+  title     String
+  body      String
+  /// Deep-link target, e.g. { "screen": "task-detail", "taskId": "..." }.
+  data      Json?
+  readAt    DateTime?
+  createdAt DateTime         @default(now())
+
+  @@index([userId])
+  @@index([userId, readAt])
+}
+
+/// A device's push token (one row per device per user). Registered on login,
+/// deregistered on logout. `disabledAt` is set when the push provider reports
+/// the token invalid/expired (Expo DeviceNotRegistered), so the processor can
+/// skip it without deleting the row's audit history.
+model PushToken {
+  id         String    @id @default(uuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id])
+  token      String // e.g. an Expo push token
+  platform   String // "ios" | "android"
+  deviceId   String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  disabledAt DateTime? // set when the provider reports the token invalid/expired
+
+  @@unique([userId, token])
+  @@index([userId])
+}
+
+/// Per-user push/notification preferences (M21 / consumed by M22 Settings).
+/// At most one row per user (userId @unique). Absence is treated as all-enabled
+/// by the push processor, so a user who never opened Settings still receives
+/// notifications.
+model NotificationPreference {
+  id                    String   @id @default(uuid())
+  userId                String   @unique
+  user                  User     @relation(fields: [userId], references: [id])
+  pushEnabled           Boolean  @default(true)
+  taskEventsEnabled     Boolean  @default(true)
+  referralEventsEnabled Boolean  @default(true)
+  accountEventsEnabled  Boolean  @default(true)
+  updatedAt             DateTime @updatedAt
 }

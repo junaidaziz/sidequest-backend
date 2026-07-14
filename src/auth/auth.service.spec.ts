@@ -7,6 +7,8 @@ import * as bcrypt from 'bcrypt';
 import { OAuth2Client } from 'google-auth-library';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
+import { ReferralsService } from '../referrals/referrals.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { AuthService } from './auth.service';
 import { TokenType } from './types/jwt-payload.interface';
 
@@ -82,6 +84,8 @@ describe('AuthService', () => {
     verifyAsync: jest.Mock;
   };
   let storage: { getSignedDownloadUrl: jest.Mock };
+  let referrals: { resolveReferrer: jest.Mock; attributeSignup: jest.Mock };
+  let notifications: { deregisterPushToken: jest.Mock };
 
   beforeEach(async () => {
     bcryptHash.mockReset().mockResolvedValue('bcrypt-hash');
@@ -105,6 +109,13 @@ describe('AuthService', () => {
     storage = {
       getSignedDownloadUrl: jest.fn().mockResolvedValue('https://signed.example/avatar'),
     };
+    referrals = {
+      resolveReferrer: jest.fn().mockResolvedValue('referrer-1'),
+      attributeSignup: jest.fn().mockResolvedValue(undefined),
+    };
+    notifications = {
+      deregisterPushToken: jest.fn().mockResolvedValue({ success: true, removed: 1 }),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -112,6 +123,8 @@ describe('AuthService', () => {
         { provide: PrismaService, useValue: prisma },
         { provide: JwtService, useValue: jwtService },
         { provide: StorageService, useValue: storage },
+        { provide: ReferralsService, useValue: referrals },
+        { provide: NotificationsService, useValue: notifications },
         {
           provide: ConfigService,
           useValue: { getOrThrow: (key: string): string => CONFIG[key] },
@@ -329,6 +342,98 @@ describe('AuthService', () => {
         service.signup({ email: 'ada@example.com', password: 'password123' }),
       ).rejects.toBe(dbError);
     });
+
+    describe('referral attribution (M20.3)', () => {
+      it('validates the code before writing and attributes the new account', async () => {
+        prisma.user.findUnique.mockResolvedValueOnce(null);
+        prisma.user.create.mockResolvedValue(buildUser({ id: 'referee-1' }));
+        referrals.resolveReferrer.mockResolvedValue('referrer-1');
+
+        await service.signup({
+          email: 'ada@example.com',
+          password: 'password123',
+          referralCode: 'H7KMNP34',
+        });
+
+        expect(referrals.resolveReferrer).toHaveBeenCalledWith('H7KMNP34', undefined);
+        expect(referrals.attributeSignup).toHaveBeenCalledWith({
+          refereeId: 'referee-1',
+          referrerId: 'referrer-1',
+          code: 'H7KMNP34',
+        });
+      });
+
+      it('surfaces an invalid code as the thrown error without creating an account', async () => {
+        prisma.user.findUnique.mockResolvedValueOnce(null);
+        referrals.resolveReferrer.mockRejectedValue(new Error('Invalid referral code'));
+
+        await expect(
+          service.signup({
+            email: 'ada@example.com',
+            password: 'password123',
+            referralCode: 'BADCODE1',
+          }),
+        ).rejects.toThrow('Invalid referral code');
+        expect(prisma.user.create).not.toHaveBeenCalled();
+        expect(referrals.attributeSignup).not.toHaveBeenCalled();
+      });
+
+      it('does not attribute anything when no referral code is supplied', async () => {
+        prisma.user.findUnique.mockResolvedValueOnce(null);
+        prisma.user.create.mockResolvedValue(buildUser());
+
+        await service.signup({ email: 'ada@example.com', password: 'password123' });
+
+        expect(referrals.resolveReferrer).not.toHaveBeenCalled();
+        expect(referrals.attributeSignup).not.toHaveBeenCalled();
+      });
+
+      it('passes the upgrading guest id as the self-referral candidate', async () => {
+        prisma.user.findUnique
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce(buildUser({ id: 'guest-1', isGuest: true, email: null }));
+        prisma.user.update.mockResolvedValue(buildUser({ id: 'guest-1', isGuest: false }));
+        jwtService.verify.mockReturnValue({
+          sub: 'guest-1',
+          isGuest: true,
+          type: TokenType.Access,
+        });
+
+        await service.signup(
+          { email: 'ada@example.com', password: 'password123', referralCode: 'H7KMNP34' },
+          'Bearer guest-token',
+        );
+
+        expect(referrals.resolveReferrer).toHaveBeenCalledWith('H7KMNP34', 'guest-1');
+        expect(referrals.attributeSignup).toHaveBeenCalledWith({
+          refereeId: 'guest-1',
+          referrerId: 'referrer-1',
+          code: 'H7KMNP34',
+        });
+      });
+
+      it('does not fail signup when attribution fails after the account is already committed', async () => {
+        // Regression test: attributeSignup used to be called with no isolation
+        // of its own, so a non-P2002 failure (e.g. a transient DB error) would
+        // propagate into signup()'s outer catch and be rethrown as a 500 —
+        // even though the account row was already written. The caller should
+        // get their 201 with a working account; the unattributed referral is
+        // logged, not fatal.
+        prisma.user.findUnique.mockResolvedValueOnce(null);
+        prisma.user.create.mockResolvedValue(buildUser({ id: 'referee-1' }));
+        referrals.resolveReferrer.mockResolvedValue('referrer-1');
+        referrals.attributeSignup.mockRejectedValueOnce(new Error('connection reset'));
+
+        const result = await service.signup({
+          email: 'ada@example.com',
+          password: 'password123',
+          referralCode: 'H7KMNP34',
+        });
+
+        expect(result.user.id).toBe('referee-1');
+        expect(referrals.attributeSignup).toHaveBeenCalledTimes(1);
+      });
+    });
   });
 
   describe('googleAuth', () => {
@@ -527,6 +632,49 @@ describe('AuthService', () => {
         }),
       });
       expect(prisma.user.update).not.toHaveBeenCalled();
+    });
+
+    it('attributes a referral when a brand-new Google account is created', async () => {
+      mockGooglePayload();
+      prisma.user.findUnique
+        .mockResolvedValueOnce(null) // googleId miss
+        .mockResolvedValueOnce(null); // email miss
+      prisma.user.create.mockResolvedValue(buildUser({ id: 'referee-g', isGuest: false }));
+      referrals.resolveReferrer.mockResolvedValue('referrer-1');
+
+      await service.googleAuth({ idToken: 'good.token', referralCode: 'H7KMNP34' });
+
+      expect(referrals.attributeSignup).toHaveBeenCalledWith({
+        refereeId: 'referee-g',
+        referrerId: 'referrer-1',
+        code: 'H7KMNP34',
+      });
+    });
+
+    it('validates but does NOT attribute a referral for a returning Google user', async () => {
+      mockGooglePayload();
+      const existing = buildUser({ id: 'gu-1', googleId: 'google-sub', isGuest: false });
+      prisma.user.findUnique.mockResolvedValueOnce(existing);
+      prisma.user.update.mockResolvedValue(existing);
+      referrals.resolveReferrer.mockResolvedValue('referrer-1');
+
+      await service.googleAuth({ idToken: 'good.token', referralCode: 'H7KMNP34' });
+
+      // The code is still validated up front (invalid → 400)...
+      expect(referrals.resolveReferrer).toHaveBeenCalledWith('H7KMNP34', undefined);
+      // ...but a returning user already registered, so nothing is attributed.
+      expect(referrals.attributeSignup).not.toHaveBeenCalled();
+    });
+
+    it('rejects a Google sign-in with an invalid referral code before any DB write', async () => {
+      mockGooglePayload();
+      referrals.resolveReferrer.mockRejectedValue(new Error('Invalid referral code'));
+
+      await expect(
+        service.googleAuth({ idToken: 'good.token', referralCode: 'BADCODE1' }),
+      ).rejects.toThrow('Invalid referral code');
+      expect(prisma.user.create).not.toHaveBeenCalled();
+      expect(referrals.attributeSignup).not.toHaveBeenCalled();
     });
 
     it('falls back to creating an account when a guest bearer token no longer qualifies', async () => {
@@ -787,6 +935,29 @@ describe('AuthService', () => {
         where: { id: 'user-1' },
         data: { refreshTokenHash: null },
       });
+      expect(result).toEqual({ success: true });
+      // No push token supplied => no deregistration attempted.
+      expect(notifications.deregisterPushToken).not.toHaveBeenCalled();
+    });
+
+    it('deregisters the device push token when one is supplied (M21.3)', async () => {
+      prisma.user.update.mockResolvedValue(buildUser({ refreshTokenHash: null }));
+
+      const result = await service.logout('user-1', 'ExponentPushToken[abc]');
+
+      expect(notifications.deregisterPushToken).toHaveBeenCalledWith(
+        'user-1',
+        'ExponentPushToken[abc]',
+      );
+      expect(result).toEqual({ success: true });
+    });
+
+    it('still logs out when push-token deregistration fails (isolation)', async () => {
+      prisma.user.update.mockResolvedValue(buildUser({ refreshTokenHash: null }));
+      notifications.deregisterPushToken.mockRejectedValue(new Error('db down'));
+
+      const result = await service.logout('user-1', 'ExponentPushToken[abc]');
+
       expect(result).toEqual({ success: true });
     });
 

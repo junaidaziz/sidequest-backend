@@ -117,10 +117,18 @@ describe('AuthController', () => {
   it('POST /auth/logout revokes the refresh token for the authenticated user', async () => {
     const user: AuthUser = { userId: 'user-1', email: 'ada@example.com', isGuest: false };
 
-    const result = await controller.logout(user);
+    const result = await controller.logout(user, {});
 
-    expect(service.logout).toHaveBeenCalledWith('user-1');
+    expect(service.logout).toHaveBeenCalledWith('user-1', undefined);
     expect(result).toEqual({ success: true });
+  });
+
+  it('POST /auth/logout forwards a supplied push token for deregistration (M21.3)', async () => {
+    const user: AuthUser = { userId: 'user-1', email: 'ada@example.com', isGuest: false };
+
+    await controller.logout(user, { pushToken: 'ExponentPushToken[abc]' });
+
+    expect(service.logout).toHaveBeenCalledWith('user-1', 'ExponentPushToken[abc]');
   });
 
   it('GET /auth/me returns the profile for the authenticated user', async () => {

@@ -18,6 +18,10 @@ import { HomeModule } from './home/home.module';
 import { VerificationModule } from './verification/verification.module';
 import { AdminModule } from './admin/admin.module';
 import { PaymentModule } from './payment/payment.module';
+import { IdempotencyModule } from './idempotency/idempotency.module';
+import { TasksModule } from './tasks/tasks.module';
+import { ReferralsModule } from './referrals/referrals.module';
+import { NotificationsModule } from './notifications/notifications.module';
 
 /**
  * `Number(...)` of a non-numeric env value silently produces NaN, which would
@@ -71,9 +75,9 @@ function bullConnectionFromRedisUrl(redisUrl: string): {
         storage: new ThrottlerStorageRedisService(redis),
       }),
     }),
-    // BullMQ root connection for every queue (currently the verification
-    // auto-approve queue). Connection built from REDIS_URL, same store the
-    // throttler and cache use.
+    // BullMQ root connection for every queue (the verification auto-approve
+    // queue and the notifications push-delivery queue). Connection built from
+    // REDIS_URL, same store the throttler and cache use.
     BullModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
@@ -91,6 +95,10 @@ function bullConnectionFromRedisUrl(redisUrl: string): {
     VerificationModule,
     AdminModule,
     PaymentModule,
+    IdempotencyModule,
+    TasksModule,
+    ReferralsModule,
+    NotificationsModule,
   ],
   controllers: [AppController],
   providers: [

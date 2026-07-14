@@ -3,6 +3,8 @@ import { ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { StorageModule } from '../storage/storage.module';
+import { ReferralsModule } from '../referrals/referrals.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
@@ -13,6 +15,14 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     // StorageService resolves the avatar S3 object key to a presigned GET URL
     // when building UserProfileDto.
     StorageModule,
+    // Referral-code attribution at signup / Google sign-in (M20.3). One-
+    // directional: AuthModule -> ReferralsModule; ReferralsModule does not
+    // import AuthModule, so there is no dependency cycle.
+    ReferralsModule,
+    // Push-token deregistration on logout (M21.3). One-directional:
+    // AuthModule -> NotificationsModule; NotificationsModule does not import
+    // AuthModule, so there is no dependency cycle.
+    NotificationsModule,
     JwtModule.registerAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({

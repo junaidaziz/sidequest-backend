@@ -241,6 +241,26 @@ const MISSIONS = [
   },
 ];
 
+/**
+ * The single active referral reward rule for v1 (M20, Decisions 3 & 4). The
+ * qualifying trigger is the referee's first approved completion (not
+ * registration alone, which is trivially abusable), and the reward is XP — the
+ * same currency curated missions and peer tasks already grant (one coherent
+ * "Rewards" surface, no separate ledger). 50 XP sits in the middle of the
+ * curated mission pool (which ranges 25–90, mostly 30–60), so referring a
+ * friend who genuinely engages is worth roughly one solid mission — meaningful
+ * without dwarfing normal play. No admin UI edits this (Decision 5); ops change
+ * it via Prisma Studio. Seeded by a stable synthetic id so re-running the seed
+ * updates the same row instead of inserting duplicates.
+ */
+const REFERRAL_REWARD_RULE = {
+  id: 'seed-referral-on-first-completion',
+  trigger: 'on_referee_first_completion',
+  rewardType: 'xp',
+  rewardAmount: 50,
+  isActive: true,
+};
+
 async function main() {
   for (const mission of MISSIONS) {
     await prisma.mission.upsert({
@@ -250,6 +270,18 @@ async function main() {
     });
   }
   console.log(`Seeded ${MISSIONS.length} missions.`);
+
+  await prisma.referralRewardRule.upsert({
+    where: { id: REFERRAL_REWARD_RULE.id },
+    update: {
+      trigger: REFERRAL_REWARD_RULE.trigger,
+      rewardType: REFERRAL_REWARD_RULE.rewardType,
+      rewardAmount: REFERRAL_REWARD_RULE.rewardAmount,
+      isActive: REFERRAL_REWARD_RULE.isActive,
+    },
+    create: REFERRAL_REWARD_RULE,
+  });
+  console.log('Seeded 1 referral reward rule (on_referee_first_completion, 50 xp).');
 }
 
 main()

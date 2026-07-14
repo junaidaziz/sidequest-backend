@@ -34,4 +34,20 @@ export class SignupDto {
   @IsString()
   @MaxLength(50)
   displayName?: string;
+
+  @ApiProperty({
+    required: false,
+    example: 'H7KMNP34',
+    description:
+      'Optional referral code the user arrived with (M20). Validated server-side; ' +
+      'an invalid code is a 400. Attributed through the same guest-upgrade-in-place ' +
+      'path a pre-registration guest already follows.',
+  })
+  // Codes are uppercase; normalise so a pasted lowercase/whitespace-padded value
+  // still matches. The real existence check happens in ReferralsService.
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim().toUpperCase() : value))
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  referralCode?: string;
 }

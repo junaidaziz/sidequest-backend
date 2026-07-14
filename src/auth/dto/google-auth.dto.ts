@@ -1,5 +1,6 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsNotEmpty, IsString } from 'class-validator';
+import { Transform } from 'class-transformer';
+import { IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
 
 export class GoogleAuthDto {
   @ApiProperty({
@@ -11,4 +12,18 @@ export class GoogleAuthDto {
   @IsString()
   @IsNotEmpty()
   idToken!: string;
+
+  @ApiProperty({
+    required: false,
+    example: 'H7KMNP34',
+    description:
+      'Optional referral code the user arrived with (M20). Validated server-side; ' +
+      'an invalid code is a 400. Only attributed when this Google sign-in creates a ' +
+      'new account or upgrades a guest in place — never for a returning user.',
+  })
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim().toUpperCase() : value))
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  referralCode?: string;
 }

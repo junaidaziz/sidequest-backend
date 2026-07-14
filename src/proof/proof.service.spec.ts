@@ -4,6 +4,7 @@ import { ProofType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { VerificationQueueService } from '../verification/verification-queue.service';
+import { ReferralsService } from '../referrals/referrals.service';
 import { ProofService } from './proof.service';
 
 interface TxMock {
@@ -80,6 +81,7 @@ describe('ProofService', () => {
   let tx: TxMock;
   let storage: StorageMock;
   let verificationQueue: VerificationQueueMock;
+  let referrals: { recordCompletionIfQualifying: jest.Mock };
 
   beforeEach(async () => {
     tx = {
@@ -101,6 +103,9 @@ describe('ProofService', () => {
     verificationQueue = {
       enqueueAutoApprove: jest.fn().mockResolvedValue(undefined),
     };
+    referrals = {
+      recordCompletionIfQualifying: jest.fn().mockResolvedValue(undefined),
+    };
 
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
@@ -108,6 +113,7 @@ describe('ProofService', () => {
         { provide: PrismaService, useValue: prisma },
         { provide: StorageService, useValue: storage },
         { provide: VerificationQueueService, useValue: verificationQueue },
+        { provide: ReferralsService, useValue: referrals },
       ],
     }).compile();
 
@@ -409,6 +415,45 @@ describe('ProofService', () => {
       await expect(
         service.submitProof(USER_ID, MISSION_ID, undefined, 'caption'),
       ).resolves.toMatchObject({ completionId: 'completion-1' });
+    });
+  });
+
+  describe('referral completion hook (M20)', () => {
+    it('fires the completion hook with the completing user after a completion', async () => {
+      stubHappyTransaction();
+
+      await service.submitProof(USER_ID, MISSION_ID, undefined, 'caption');
+
+      expect(referrals.recordCompletionIfQualifying).toHaveBeenCalledWith(USER_ID);
+    });
+
+    it('still returns the completion when the referral hook throws (best-effort)', async () => {
+      stubHappyTransaction();
+      referrals.recordCompletionIfQualifying.mockRejectedValue(new Error('referral db down'));
+
+      await expect(
+        service.submitProof(USER_ID, MISSION_ID, undefined, 'caption'),
+      ).resolves.toMatchObject({ completionId: 'completion-1' });
+    });
+
+    it('tolerates a non-Error referral-hook rejection without a stack trace', async () => {
+      stubHappyTransaction();
+      referrals.recordCompletionIfQualifying.mockRejectedValue('referral db down');
+
+      await expect(
+        service.submitProof(USER_ID, MISSION_ID, undefined, 'caption'),
+      ).resolves.toMatchObject({ completionId: 'completion-1' });
+    });
+
+    it('does not fire the hook when the completion fails before commit', async () => {
+      prisma.mission.findUnique.mockResolvedValue(activeMission());
+      prisma.user.findUnique.mockResolvedValue(precheckUser());
+      prisma.completion.count.mockResolvedValue(1); // guest over the limit
+
+      await expect(
+        service.submitProof(USER_ID, MISSION_ID, undefined, 'caption'),
+      ).rejects.toBeDefined();
+      expect(referrals.recordCompletionIfQualifying).not.toHaveBeenCalled();
     });
   });
 });
