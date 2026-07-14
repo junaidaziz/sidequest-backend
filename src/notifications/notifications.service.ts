@@ -156,6 +156,19 @@ export class NotificationsService {
     return { success: true, removed: result.count };
   }
 
+  /**
+   * Removes every device push token for a user in one write. Used by account
+   * deletion (M22.2) so a soft-deleted user stops receiving pushes on all their
+   * devices at once, not just the calling device. Idempotent (removing zero rows
+   * still succeeds), so it is safe to call from the delete flow without a prior
+   * existence check.
+   */
+  async deregisterAllPushTokens(userId: string): Promise<DeregisterPushTokenResultDto> {
+    const result = await this.prisma.pushToken.deleteMany({ where: { userId } });
+    this.logger.log(`All push tokens deregistered for user ${userId} (removed ${result.count})`);
+    return { success: true, removed: result.count };
+  }
+
   // --------------------------------------------------------------------------
   // M21 — Preferences (read/update; surfaced in M22 Settings)
   // --------------------------------------------------------------------------

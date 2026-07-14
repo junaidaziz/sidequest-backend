@@ -18,6 +18,8 @@ describe('AuthController', () => {
     logout: jest.Mock;
     getProfile: jest.Mock;
     updateDisplayName: jest.Mock;
+    changePassword: jest.Mock;
+    deleteAccount: jest.Mock;
   };
 
   beforeEach(async () => {
@@ -30,6 +32,8 @@ describe('AuthController', () => {
       logout: jest.fn().mockResolvedValue({ success: true }),
       getProfile: jest.fn(),
       updateDisplayName: jest.fn(),
+      changePassword: jest.fn().mockResolvedValue({ success: true }),
+      deleteAccount: jest.fn().mockResolvedValue({ success: true }),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -163,5 +167,55 @@ describe('AuthController', () => {
 
     expect(service.updateDisplayName).toHaveBeenCalledWith('user-1', 'New Name');
     expect(result).toEqual(profile);
+  });
+
+  it('PATCH /auth/password forwards the DTO for the authenticated user', async () => {
+    const user: AuthUser = { userId: 'user-1', email: 'ada@example.com', isGuest: false };
+    const dto = { currentPassword: 'old-password', newPassword: 'new-password' };
+
+    const result = await controller.changePassword(user, dto);
+
+    expect(service.changePassword).toHaveBeenCalledWith('user-1', dto);
+    expect(result).toEqual({ success: true });
+  });
+
+  it('PATCH /auth/password is rate-limited in the same sensitive tier as login', () => {
+    const limitKey = 'THROTTLER:LIMITdefault';
+    const ttlKey = 'THROTTLER:TTLdefault';
+    const pwLimit = Reflect.getMetadata(
+      limitKey,
+      AuthController.prototype.changePassword,
+    ) as unknown;
+    const pwTtl = Reflect.getMetadata(ttlKey, AuthController.prototype.changePassword) as unknown;
+
+    expect(pwLimit).toBe(Reflect.getMetadata(limitKey, AuthController.prototype.login) as unknown);
+    expect(pwTtl).toBe(Reflect.getMetadata(ttlKey, AuthController.prototype.login) as unknown);
+    expect(pwLimit).toBe(5);
+    expect(pwTtl).toBe(60_000);
+  });
+
+  it('DELETE /auth/me forwards the re-auth DTO for the authenticated user', async () => {
+    const user: AuthUser = { userId: 'user-1', email: 'ada@example.com', isGuest: false };
+    const dto = { currentPassword: 'old-password' };
+
+    const result = await controller.deleteAccount(user, dto);
+
+    expect(service.deleteAccount).toHaveBeenCalledWith('user-1', dto);
+    expect(result).toEqual({ success: true });
+  });
+
+  it('DELETE /auth/me is rate-limited in the same sensitive tier as login', () => {
+    const limitKey = 'THROTTLER:LIMITdefault';
+    const ttlKey = 'THROTTLER:TTLdefault';
+    const delLimit = Reflect.getMetadata(
+      limitKey,
+      AuthController.prototype.deleteAccount,
+    ) as unknown;
+    const delTtl = Reflect.getMetadata(ttlKey, AuthController.prototype.deleteAccount) as unknown;
+
+    expect(delLimit).toBe(Reflect.getMetadata(limitKey, AuthController.prototype.login) as unknown);
+    expect(delTtl).toBe(Reflect.getMetadata(ttlKey, AuthController.prototype.login) as unknown);
+    expect(delLimit).toBe(5);
+    expect(delTtl).toBe(60_000);
   });
 });

@@ -777,8 +777,15 @@ export class TasksService {
     };
   }
 
-  /** Resolves an attachment key to a presigned URL, degrading to null on failure. */
-  private async signAttachment(objectKey: string): Promise<string | null> {
+  /**
+   * Resolves an attachment key to a presigned URL, degrading to null on failure.
+   * A null key means the attachment was de-referenced by the submitter's account
+   * deletion (M22.2) — there is no media to sign, so return null directly.
+   */
+  private async signAttachment(objectKey: string | null): Promise<string | null> {
+    if (!objectKey) {
+      return null;
+    }
     try {
       return await this.storage.getSignedDownloadUrl(objectKey);
     } catch (error) {

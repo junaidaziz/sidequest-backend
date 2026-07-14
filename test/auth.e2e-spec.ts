@@ -35,6 +35,9 @@ describe('Auth (e2e)', () => {
 
   afterAll(async () => {
     await prisma.user.deleteMany({ where: { email: createdEmail } });
+    // M22 tests create dedicated accounts under this prefix — hard-delete them
+    // (soft-delete leaves the row + retained email behind by design).
+    await prisma.user.deleteMany({ where: { email: { startsWith: 'e2e-m22-' } } });
     await app.close();
   });
 
@@ -181,6 +184,160 @@ describe('Auth (e2e)', () => {
         .post('/auth/refresh')
         .send({ refreshToken: guest2.body.refreshToken })
         .expect(401);
+    });
+  });
+
+  describe('PATCH /auth/password (M22.1)', () => {
+    // Reset shared throttle counters so this suite's signup/login/password calls
+    // start from a clean per-handler budget (see resetThrottleState).
+    beforeAll(() => resetThrottleState(app));
+
+    it('returns 401 without an access token', async () => {
+      await request(app.getHttpServer())
+        .patch('/auth/password')
+        .send({ currentPassword: 'password123', newPassword: 'new-password-1' })
+        .expect(401);
+    });
+
+    it('returns a distinct 400 for a guest / no-password account (not a fake 401)', async () => {
+      const guest = await request(app.getHttpServer()).post('/auth/guest').expect(201);
+
+      await request(app.getHttpServer())
+        .patch('/auth/password')
+        .set('Authorization', `Bearer ${guest.body.accessToken}`)
+        .send({ currentPassword: 'password123', newPassword: 'new-password-1' })
+        .expect(400);
+    });
+
+    it('changes the password: old credentials stop working, new ones authenticate', async () => {
+      const email = `e2e-m22-pw-${Date.now()}@example.com`;
+      const signup = await request(app.getHttpServer())
+        .post('/auth/signup')
+        .send({ email, password: 'password123' })
+        .expect(201);
+      const token = signup.body.accessToken;
+
+      // Wrong current password is a 401, not a silent success.
+      await request(app.getHttpServer())
+        .patch('/auth/password')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ currentPassword: 'wrong-password', newPassword: 'new-password-1' })
+        .expect(401);
+
+      await request(app.getHttpServer())
+        .patch('/auth/password')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ currentPassword: 'password123', newPassword: 'new-password-1' })
+        .expect(200)
+        .expect((res) => expect(res.body).toEqual({ success: true }));
+
+      // Old password now fails, the new one works.
+      await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email, password: 'password123' })
+        .expect(401);
+      await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email, password: 'new-password-1' })
+        .expect(200);
+    });
+
+    it('revokes the refresh token on a successful change — an attacker holding it cannot ride out the password change', async () => {
+      const email = `e2e-m22-pw-revoke-${Date.now()}@example.com`;
+      const signup = await request(app.getHttpServer())
+        .post('/auth/signup')
+        .send({ email, password: 'password123' })
+        .expect(201);
+      const { accessToken, refreshToken } = signup.body;
+
+      await request(app.getHttpServer())
+        .patch('/auth/password')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .send({ currentPassword: 'password123', newPassword: 'new-password-2' })
+        .expect(200);
+
+      await request(app.getHttpServer()).post('/auth/refresh').send({ refreshToken }).expect(401);
+    });
+  });
+
+  describe('DELETE /auth/me (M22.2)', () => {
+    beforeAll(() => resetThrottleState(app));
+
+    it('returns 401 without an access token', async () => {
+      await request(app.getHttpServer()).delete('/auth/me').expect(401);
+    });
+
+    it('requires confirm=true for a guest / no-password account', async () => {
+      const guest = await request(app.getHttpServer()).post('/auth/guest').expect(201);
+
+      await request(app.getHttpServer())
+        .delete('/auth/me')
+        .set('Authorization', `Bearer ${guest.body.accessToken}`)
+        .send({})
+        .expect(400);
+    });
+
+    it('soft-deletes a no-password account on confirm and invalidates its tokens', async () => {
+      const guest = await request(app.getHttpServer()).post('/auth/guest').expect(201);
+
+      await request(app.getHttpServer())
+        .delete('/auth/me')
+        .set('Authorization', `Bearer ${guest.body.accessToken}`)
+        .send({ confirm: true })
+        .expect(200)
+        .expect((res) => expect(res.body).toEqual({ success: true }));
+
+      // The access token is rejected immediately (JwtStrategy rejects deletedAt).
+      await request(app.getHttpServer())
+        .get('/auth/me')
+        .set('Authorization', `Bearer ${guest.body.accessToken}`)
+        .expect(401);
+      // The refresh token is orphaned too.
+      await request(app.getHttpServer())
+        .post('/auth/refresh')
+        .send({ refreshToken: guest.body.refreshToken })
+        .expect(401);
+    });
+
+    it('rejects a wrong current password on a password account (401)', async () => {
+      const email = `e2e-m22-del-a-${Date.now()}@example.com`;
+      const signup = await request(app.getHttpServer())
+        .post('/auth/signup')
+        .send({ email, password: 'password123' })
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .delete('/auth/me')
+        .set('Authorization', `Bearer ${signup.body.accessToken}`)
+        .send({ currentPassword: 'wrong-password' })
+        .expect(401);
+    });
+
+    it('soft-deletes a password account with the correct password and invalidates its token', async () => {
+      const email = `e2e-m22-del-b-${Date.now()}@example.com`;
+      const signup = await request(app.getHttpServer())
+        .post('/auth/signup')
+        .send({ email, password: 'password123' })
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .delete('/auth/me')
+        .set('Authorization', `Bearer ${signup.body.accessToken}`)
+        .send({ currentPassword: 'password123' })
+        .expect(200)
+        .expect((res) => expect(res.body).toEqual({ success: true }));
+
+      await request(app.getHttpServer())
+        .get('/auth/me')
+        .set('Authorization', `Bearer ${signup.body.accessToken}`)
+        .expect(401);
+
+      // The email/googleId are NOT released for re-registration (v1): a fresh
+      // signup on the same email is a 409, proving the unique constraint stays taken.
+      await request(app.getHttpServer())
+        .post('/auth/signup')
+        .send({ email, password: 'password123' })
+        .expect(409);
     });
   });
 });

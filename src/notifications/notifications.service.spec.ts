@@ -222,6 +222,25 @@ describe('NotificationsService', () => {
     });
   });
 
+  describe('deregisterAllPushTokens (M22.2 account deletion)', () => {
+    it('removes every token for the user and reports the count', async () => {
+      prisma.pushToken.deleteMany.mockResolvedValue({ count: 3 });
+
+      const result = await service.deregisterAllPushTokens(USER);
+
+      expect(prisma.pushToken.deleteMany).toHaveBeenCalledWith({ where: { userId: USER } });
+      expect(result).toEqual({ success: true, removed: 3 });
+    });
+
+    it('is idempotent — reports removed=0 when the user had no tokens', async () => {
+      prisma.pushToken.deleteMany.mockResolvedValue({ count: 0 });
+
+      const result = await service.deregisterAllPushTokens(USER);
+
+      expect(result).toEqual({ success: true, removed: 0 });
+    });
+  });
+
   describe('getPreferences', () => {
     it('returns the persisted preference row when it exists', async () => {
       prisma.notificationPreference.findUnique.mockResolvedValue({

@@ -1,4 +1,4 @@
-import { ConflictException, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { Test, TestingModule } from '@nestjs/testing';
@@ -77,15 +77,18 @@ describe('AuthService', () => {
       findUnique: jest.Mock;
       update: jest.Mock;
     };
+    completion: { findMany: jest.Mock; updateMany: jest.Mock };
+    userTaskAttachment: { findMany: jest.Mock; updateMany: jest.Mock };
+    $transaction: jest.Mock;
   };
   let jwtService: {
     signAsync: jest.Mock;
     verify: jest.Mock;
     verifyAsync: jest.Mock;
   };
-  let storage: { getSignedDownloadUrl: jest.Mock };
+  let storage: { getSignedDownloadUrl: jest.Mock; deleteObject: jest.Mock };
   let referrals: { resolveReferrer: jest.Mock; attributeSignup: jest.Mock };
-  let notifications: { deregisterPushToken: jest.Mock };
+  let notifications: { deregisterPushToken: jest.Mock; deregisterAllPushTokens: jest.Mock };
 
   beforeEach(async () => {
     bcryptHash.mockReset().mockResolvedValue('bcrypt-hash');
@@ -97,6 +100,17 @@ describe('AuthService', () => {
         findUnique: jest.fn(),
         update: jest.fn().mockResolvedValue(buildUser()),
       },
+      completion: {
+        findMany: jest.fn().mockResolvedValue([]),
+        updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
+      userTaskAttachment: {
+        findMany: jest.fn().mockResolvedValue([]),
+        updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
+      // Interactive transaction: invoke the callback with the same prisma mock as
+      // the transactional client so per-model mocks above are reused inside it.
+      $transaction: jest.fn((cb: (tx: unknown) => unknown) => cb(prisma)),
     };
     jwtService = {
       signAsync: jest
@@ -108,6 +122,7 @@ describe('AuthService', () => {
     };
     storage = {
       getSignedDownloadUrl: jest.fn().mockResolvedValue('https://signed.example/avatar'),
+      deleteObject: jest.fn().mockResolvedValue(undefined),
     };
     referrals = {
       resolveReferrer: jest.fn().mockResolvedValue('referrer-1'),
@@ -115,6 +130,7 @@ describe('AuthService', () => {
     };
     notifications = {
       deregisterPushToken: jest.fn().mockResolvedValue({ success: true, removed: 1 }),
+      deregisterAllPushTokens: jest.fn().mockResolvedValue({ success: true, removed: 2 }),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -1052,6 +1068,213 @@ describe('AuthService', () => {
 
       expect(storage.getSignedDownloadUrl).toHaveBeenCalledWith('avatars/user-1/pic.png');
       expect(profile.avatarUrl).toBe('https://signed.example/avatar');
+    });
+  });
+
+  describe('changePassword (M22.1)', () => {
+    it('rejects a no-password (guest/Google-only) account with a distinct 400', async () => {
+      prisma.user.findUnique.mockResolvedValue(buildUser({ passwordHash: null }));
+
+      await expect(
+        service.changePassword('user-1', { currentPassword: 'x', newPassword: 'new-password' }),
+      ).rejects.toThrow(BadRequestException);
+      // Not a confusing UnauthorizedException — never even calls bcrypt.compare.
+      expect(bcryptCompare).not.toHaveBeenCalled();
+      expect(prisma.user.update).not.toHaveBeenCalled();
+    });
+
+    it('rejects a wrong current password with 401', async () => {
+      prisma.user.findUnique.mockResolvedValue(buildUser());
+      bcryptCompare.mockResolvedValue(false);
+
+      await expect(
+        service.changePassword('user-1', {
+          currentPassword: 'wrong',
+          newPassword: 'new-password',
+        }),
+      ).rejects.toThrow(UnauthorizedException);
+      expect(prisma.user.update).not.toHaveBeenCalled();
+    });
+
+    it('rejects a new password identical to the current one with 400', async () => {
+      prisma.user.findUnique.mockResolvedValue(buildUser());
+      bcryptCompare.mockResolvedValue(true);
+
+      await expect(
+        service.changePassword('user-1', {
+          currentPassword: 'same-password',
+          newPassword: 'same-password',
+        }),
+      ).rejects.toThrow(BadRequestException);
+      expect(prisma.user.update).not.toHaveBeenCalled();
+    });
+
+    it('hashes and stores the new password on a valid change', async () => {
+      prisma.user.findUnique.mockResolvedValue(buildUser());
+      bcryptCompare.mockResolvedValue(true);
+      bcryptHash.mockResolvedValue('new-bcrypt-hash');
+
+      const result = await service.changePassword('user-1', {
+        currentPassword: 'current-password',
+        newPassword: 'new-password',
+      });
+
+      expect(bcryptHash).toHaveBeenCalledWith('new-password', 12);
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'user-1' },
+        data: { passwordHash: 'new-bcrypt-hash', refreshTokenHash: null },
+      });
+      expect(result).toEqual({ success: true });
+    });
+
+    it('rejects a missing/soft-deleted user with 401 (defensive)', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.changePassword('ghost', { currentPassword: 'x', newPassword: 'new-password' }),
+      ).rejects.toThrow(UnauthorizedException);
+    });
+  });
+
+  describe('deleteAccount (M22.2)', () => {
+    it('requires currentPassword for a password account (400)', async () => {
+      prisma.user.findUnique.mockResolvedValue(buildUser());
+
+      await expect(service.deleteAccount('user-1', {})).rejects.toThrow(BadRequestException);
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('rejects a wrong current password for a password account (401)', async () => {
+      prisma.user.findUnique.mockResolvedValue(buildUser());
+      bcryptCompare.mockResolvedValue(false);
+
+      await expect(service.deleteAccount('user-1', { currentPassword: 'wrong' })).rejects.toThrow(
+        UnauthorizedException,
+      );
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('requires confirm=true for a no-password (Google/guest) account (400)', async () => {
+      prisma.user.findUnique.mockResolvedValue(buildUser({ passwordHash: null }));
+
+      await expect(service.deleteAccount('user-1', {})).rejects.toThrow(BadRequestException);
+      // Never attempts a bcrypt compare — there is no password to verify.
+      expect(bcryptCompare).not.toHaveBeenCalled();
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('does not let a password account bypass the password check by sending confirm=true alone', async () => {
+      // Regression test named per independent review: `confirm` and
+      // `currentPassword` are not an either/or on a password account — only
+      // proving the password is accepted. Sending confirm=true with no
+      // currentPassword must still 400, never skip straight to deletion.
+      prisma.user.findUnique.mockResolvedValue(buildUser());
+
+      await expect(service.deleteAccount('user-1', { confirm: true })).rejects.toThrow(
+        BadRequestException,
+      );
+      expect(bcryptCompare).not.toHaveBeenCalled();
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('soft-deletes and anonymizes on a correct password', async () => {
+      prisma.user.findUnique.mockResolvedValue(buildUser());
+      bcryptCompare.mockResolvedValue(true);
+
+      const result = await service.deleteAccount('user-1', { currentPassword: 'current-password' });
+
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'user-1' },
+        data: {
+          deletedAt: expect.any(Date),
+          refreshTokenHash: null,
+          displayName: 'Deleted User',
+          avatarUrl: null,
+        },
+      });
+      expect(result).toEqual({ success: true });
+    });
+
+    it('soft-deletes a no-password account when confirm=true', async () => {
+      prisma.user.findUnique.mockResolvedValue(buildUser({ passwordHash: null }));
+
+      const result = await service.deleteAccount('user-1', { confirm: true });
+
+      expect(prisma.user.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            displayName: 'Deleted User',
+            deletedAt: expect.any(Date),
+          }),
+        }),
+      );
+      expect(result).toEqual({ success: true });
+    });
+
+    it('de-references owned media pointers and best-effort deletes the S3 objects', async () => {
+      prisma.user.findUnique.mockResolvedValue(buildUser({ avatarUrl: 'avatars/user-1/pic.png' }));
+      bcryptCompare.mockResolvedValue(true);
+      prisma.completion.findMany.mockResolvedValue([
+        { proofKey: 'proofs/a.jpg' },
+        { proofKey: 'proofs/b.jpg' },
+      ]);
+      prisma.userTaskAttachment.findMany.mockResolvedValue([
+        { id: 'att-1', objectKey: 'att/1.jpg' },
+      ]);
+
+      await service.deleteAccount('user-1', { currentPassword: 'current-password' });
+
+      // DB pointers nulled inside the transaction, scoped to the deleting user.
+      expect(prisma.completion.updateMany).toHaveBeenCalledWith({
+        where: { userId: 'user-1', proofKey: { not: null } },
+        data: { proofKey: null },
+      });
+      expect(prisma.userTaskAttachment.updateMany).toHaveBeenCalledWith({
+        where: { id: { in: ['att-1'] } },
+        data: { objectKey: null },
+      });
+      // Best-effort S3 delete of avatar + every proof + every attachment key.
+      expect(storage.deleteObject).toHaveBeenCalledWith('avatars/user-1/pic.png');
+      expect(storage.deleteObject).toHaveBeenCalledWith('proofs/a.jpg');
+      expect(storage.deleteObject).toHaveBeenCalledWith('proofs/b.jpg');
+      expect(storage.deleteObject).toHaveBeenCalledWith('att/1.jpg');
+    });
+
+    it("deregisters all of the user's push tokens", async () => {
+      prisma.user.findUnique.mockResolvedValue(buildUser());
+      bcryptCompare.mockResolvedValue(true);
+
+      await service.deleteAccount('user-1', { currentPassword: 'current-password' });
+
+      expect(notifications.deregisterAllPushTokens).toHaveBeenCalledWith('user-1');
+    });
+
+    it('still succeeds if push-token deregistration fails (isolated side effect)', async () => {
+      prisma.user.findUnique.mockResolvedValue(buildUser());
+      bcryptCompare.mockResolvedValue(true);
+      notifications.deregisterAllPushTokens.mockRejectedValue(new Error('redis down'));
+
+      await expect(
+        service.deleteAccount('user-1', { currentPassword: 'current-password' }),
+      ).resolves.toEqual({ success: true });
+    });
+
+    it('still succeeds if an S3 object delete fails (best-effort cleanup)', async () => {
+      prisma.user.findUnique.mockResolvedValue(buildUser({ avatarUrl: 'avatars/user-1/pic.png' }));
+      bcryptCompare.mockResolvedValue(true);
+      storage.deleteObject.mockRejectedValue(new Error('s3 unavailable'));
+
+      await expect(
+        service.deleteAccount('user-1', { currentPassword: 'current-password' }),
+      ).resolves.toEqual({ success: true });
+    });
+
+    it('rejects a missing/soft-deleted user with 401 (defensive)', async () => {
+      prisma.user.findUnique.mockResolvedValue(buildUser({ deletedAt: new Date() }));
+
+      await expect(service.deleteAccount('user-1', { currentPassword: 'x' })).rejects.toThrow(
+        UnauthorizedException,
+      );
     });
   });
 });

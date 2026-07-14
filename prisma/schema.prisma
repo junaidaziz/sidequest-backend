@@ -287,7 +287,12 @@ model UserTaskAttachment {
   submissionId String
   submission   UserTaskSubmission @relation(fields: [submissionId], references: [id])
   kind         String // "photo" | "document" — string, not enum: evidence types vary
-  objectKey    String // S3 key, resolved to a presigned GET at read time (same as Completion.proofKey)
+  /// S3 key, resolved to a presigned GET at read time (same as Completion.proofKey).
+  /// Nullable so account deletion (M22.2) can de-reference the pointer in place —
+  /// set to null when the submitting user soft-deletes their account, mirroring
+  /// how Completion.proofKey / User.avatarUrl are nulled before a best-effort S3
+  /// delete. Always set to a real key on creation.
+  objectKey    String? // S3 key, resolved to a presigned GET at read time (same as Completion.proofKey)
   createdAt    DateTime           @default(now())
 
   @@index([submissionId])

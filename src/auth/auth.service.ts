@@ -1,4 +1,10 @@
-import { ConflictException, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  Logger,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService, JwtSignOptions } from '@nestjs/jwt';
 import { Prisma, User } from '@prisma/client';
@@ -11,6 +17,10 @@ import { ReferralsService } from '../referrals/referrals.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AuthResponseDto } from './dto/auth-response.dto';
 import { AuthTokensDto } from './dto/auth-tokens.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
+import { ChangePasswordResponseDto } from './dto/change-password-response.dto';
+import { DeleteAccountDto } from './dto/delete-account.dto';
+import { DeleteAccountResponseDto } from './dto/delete-account-response.dto';
 import { GoogleAuthDto } from './dto/google-auth.dto';
 import { LoginDto } from './dto/login.dto';
 import { LogoutResponseDto } from './dto/logout-response.dto';
@@ -30,6 +40,16 @@ const GENERIC_AUTH_ERROR = 'Invalid email or password';
  */
 const GENERIC_GOOGLE_AUTH_ERROR = 'Google authentication failed';
 const INVALID_REFRESH_ERROR = 'Invalid refresh token';
+/**
+ * Anonymized display identity for a soft-deleted account (Decision 7). The row
+ * itself is retained (email/googleId stay taken, never released for re-signup);
+ * only the human-facing identity is scrubbed so any surface that reads this
+ * user's displayName renders a placeholder rather than real PII.
+ */
+const DELETED_DISPLAY_NAME = 'Deleted User';
+/** Distinct, non-confusing error for password ops on a no-password account. */
+const NO_PASSWORD_ACCOUNT_ERROR =
+  'This account has no password set (it uses Google sign-in or is a guest session), so its password cannot be changed.';
 /**
  * A real bcrypt hash (cost 12) with no corresponding password. Compared
  * against on the "email not found" fast path so login() takes the same
@@ -386,6 +406,177 @@ export class AuthService {
     });
     this.logger.log(`Display name updated for user ${userId}`);
     return this.toProfile(updated);
+  }
+
+  /**
+   * Changes a password account's password (M22.1). bcrypt-verifies the supplied
+   * current password against the stored hash using the exact BCRYPT_ROUNDS cost
+   * factor login() uses, then stores a fresh hash. A guest or Google-only account
+   * (no `passwordHash`) gets a distinct, clear error rather than a confusing
+   * "wrong password" — there is no password to compare against.
+   *
+   * The caller is already authenticated (JwtAuthGuard + JwtStrategy confirmed the
+   * row exists and is not soft-deleted), but re-reads here because the write needs
+   * the current `passwordHash` the JWT payload does not carry. The refresh token
+   * IS revoked on a successful change (independent review flagged the earlier
+   * "don't revoke, avoid surprising UX" choice as weak for a security-motivated
+   * action: this app stores a single refresh-token hash per user, so an attacker
+   * holding the current refresh token would otherwise stay authenticated —
+   * indefinitely rotating into fresh access tokens — straight through the very
+   * password change meant to lock them out). The acting device re-logs in with
+   * the new password, same as any other device; the minor friction is the point.
+   */
+  async changePassword(userId: string, dto: ChangePasswordDto): Promise<ChangePasswordResponseDto> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user || user.deletedAt) {
+      // Defensive: JwtStrategy already rejects tokens for deleted/missing users.
+      throw new UnauthorizedException('User not found');
+    }
+    if (!user.passwordHash) {
+      throw new BadRequestException(NO_PASSWORD_ACCOUNT_ERROR);
+    }
+
+    const currentMatches = await bcrypt.compare(dto.currentPassword, user.passwordHash);
+    if (!currentMatches) {
+      throw new UnauthorizedException('Current password is incorrect');
+    }
+    if (dto.newPassword === dto.currentPassword) {
+      throw new BadRequestException('New password must be different from the current password');
+    }
+
+    const passwordHash = await bcrypt.hash(dto.newPassword, BCRYPT_ROUNDS);
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { passwordHash, refreshTokenHash: null },
+    });
+    this.logger.log(`Password changed for user ${userId}; refresh token revoked`);
+    return { success: true };
+  }
+
+  /**
+   * Soft-deletes and anonymizes the authenticated user's account (M22.2,
+   * Decision 7). This is destructive-feeling, so it requires re-authentication in
+   * the request: a password account must supply the correct current password; a
+   * Google-only / guest account (no `passwordHash`) must instead confirm intent
+   * (`confirm: true`), since there is no password to verify.
+   *
+   * On success, in a single transaction: sets `deletedAt`, revokes
+   * `refreshTokenHash`, scrubs the display identity (`displayName` ->
+   * "Deleted User", `avatarUrl` cleared), and de-references every proof/evidence
+   * media pointer this user owns (`Completion.proofKey`, their submissions'
+   * `UserTaskAttachment.objectKey`). `email`/`googleId`/`passwordHash` are left
+   * intact — the unique email/googleId stay taken and are NOT released for
+   * re-registration in v1.
+   *
+   * The actual S3 object deletion and push-token deregistration happen AFTER the
+   * commit, best-effort and isolated per the UsersService avatar-delete pattern
+   * (DB pointer nulled first, S3 delete second) — so a storage/notification-side
+   * failure can never turn an already-committed soft-delete into a 500.
+   *
+   * The caller's existing access token stops working immediately: JwtStrategy
+   * rejects tokens for `deletedAt`-set users, so no parallel revocation is needed.
+   * Rewards already granted to counterparties are untouched (this method only
+   * writes the deleting user's own rows), so they are never clawed back.
+   */
+  async deleteAccount(userId: string, dto: DeleteAccountDto): Promise<DeleteAccountResponseDto> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user || user.deletedAt) {
+      // Defensive: JwtStrategy already rejects tokens for deleted/missing users.
+      throw new UnauthorizedException('User not found');
+    }
+
+    // Re-authentication gate.
+    if (user.passwordHash) {
+      if (!dto.currentPassword) {
+        throw new BadRequestException('currentPassword is required to delete this account');
+      }
+      const matches = await bcrypt.compare(dto.currentPassword, user.passwordHash);
+      if (!matches) {
+        throw new UnauthorizedException('Current password is incorrect');
+      }
+    } else if (dto.confirm !== true) {
+      throw new BadRequestException(
+        'This account has no password; set confirm=true to confirm account deletion',
+      );
+    }
+
+    // Soft-delete + anonymize + de-reference media pointers atomically. Media
+    // keys are collected before nulling so the S3 objects can be cleaned up
+    // after the commit.
+    const avatarKey = user.avatarUrl;
+    const mediaKeys = await this.prisma.$transaction(async (tx) => {
+      const [completions, attachments] = await Promise.all([
+        tx.completion.findMany({
+          where: { userId, proofKey: { not: null } },
+          select: { proofKey: true },
+        }),
+        tx.userTaskAttachment.findMany({
+          where: { submission: { submittedById: userId }, objectKey: { not: null } },
+          select: { id: true, objectKey: true },
+        }),
+      ]);
+
+      const proofKeys = completions.map((c) => c.proofKey).filter((k): k is string => k !== null);
+      const attachmentIds = attachments.map((a) => a.id);
+      const attachmentKeys = attachments
+        .map((a) => a.objectKey)
+        .filter((k): k is string => k !== null);
+
+      await tx.user.update({
+        where: { id: userId },
+        data: {
+          deletedAt: new Date(),
+          refreshTokenHash: null,
+          displayName: DELETED_DISPLAY_NAME,
+          avatarUrl: null,
+        },
+      });
+      if (proofKeys.length > 0) {
+        await tx.completion.updateMany({
+          where: { userId, proofKey: { not: null } },
+          data: { proofKey: null },
+        });
+      }
+      if (attachmentIds.length > 0) {
+        await tx.userTaskAttachment.updateMany({
+          where: { id: { in: attachmentIds } },
+          data: { objectKey: null },
+        });
+      }
+
+      return [...(avatarKey ? [avatarKey] : []), ...proofKeys, ...attachmentKeys];
+    });
+
+    this.logger.log(`Account soft-deleted and anonymized: ${userId}`);
+
+    // Best-effort S3 cleanup — DB pointers are already nulled above, mirroring
+    // UsersService.deleteAvatar so a storage failure only ever orphans an object
+    // (logged), never leaves a live pointer to deleted media. Each delete is
+    // isolated so one failure does not abort the rest.
+    for (const key of mediaKeys) {
+      try {
+        await this.storage.deleteObject(key);
+      } catch (error) {
+        this.logger.warn(
+          `Failed to delete object ${key} for deleted user ${userId}: ` +
+            (error instanceof Error ? error.message : 'unknown error'),
+        );
+      }
+    }
+
+    // Deregister every device push token (Decision 7). Isolated in its own
+    // try/catch so a notification-side failure can never turn an already-
+    // committed soft-delete into a 500 — the same isolation logout() uses.
+    try {
+      await this.notifications.deregisterAllPushTokens(userId);
+    } catch (error) {
+      this.logger.error(
+        `Push-token deregistration failed for deleted user ${userId}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+    }
+
+    return { success: true };
   }
 
   /**

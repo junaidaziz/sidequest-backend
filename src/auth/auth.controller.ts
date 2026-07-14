@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Headers,
   HttpCode,
@@ -14,6 +15,10 @@ import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { CurrentUser } from './decorators/current-user.decorator';
 import { AuthResponseDto } from './dto/auth-response.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
+import { ChangePasswordResponseDto } from './dto/change-password-response.dto';
+import { DeleteAccountDto } from './dto/delete-account.dto';
+import { DeleteAccountResponseDto } from './dto/delete-account-response.dto';
 import { GoogleAuthDto } from './dto/google-auth.dto';
 import { LoginDto } from './dto/login.dto';
 import { LogoutDto } from './dto/logout.dto';
@@ -159,5 +164,71 @@ export class AuthController {
   @ApiResponse({ status: 429, description: 'Too many requests' })
   updateMe(@CurrentUser() user: AuthUser, @Body() dto: UpdateProfileDto): Promise<UserProfileDto> {
     return this.authService.updateDisplayName(user.userId, dto.displayName);
+  }
+
+  // Same sensitive tier (5/60s) as login/signup/google — a password change is a
+  // credential-mutation surface (brute-force of currentPassword) that warrants
+  // tighter limiting than the authenticated default.
+  @Patch('password')
+  @UseGuards(JwtAuthGuard)
+  @Throttle(SENSITIVE_THROTTLE)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: "Change the authenticated user's password",
+    description:
+      'Verifies the current password with bcrypt, then stores a new hash. An ' +
+      'account with no password (Google-only or guest) receives a distinct 400 ' +
+      'rather than a confusing "wrong password".',
+  })
+  @ApiResponse({ status: 200, type: ChangePasswordResponseDto })
+  @ApiResponse({
+    status: 400,
+    description: 'Validation failed, no password set on this account, or new password unchanged',
+  })
+  @ApiResponse({
+    status: 401,
+    description: 'Missing/invalid access token or wrong current password',
+  })
+  @ApiResponse({ status: 429, description: 'Too many requests' })
+  changePassword(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: ChangePasswordDto,
+  ): Promise<ChangePasswordResponseDto> {
+    return this.authService.changePassword(user.userId, dto);
+  }
+
+  // Same sensitive tier (5/60s) as login/signup — deleting an account requires
+  // re-authentication (current password, or confirm=true for a no-password
+  // account), so it is a credential-verification surface that must be throttled
+  // like one, not left on the authenticated default.
+  @Delete('me')
+  @UseGuards(JwtAuthGuard)
+  @Throttle(SENSITIVE_THROTTLE)
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: "Soft-delete and anonymize the authenticated user's account",
+    description:
+      'Requires re-authentication in the body: currentPassword for a password ' +
+      'account, or confirm=true for a Google-only/guest account with no password. ' +
+      'Sets deletedAt, revokes the refresh token, scrubs display identity, ' +
+      'de-references owned proof/evidence media, and deregisters all push tokens. ' +
+      "The caller's existing tokens stop working immediately.",
+  })
+  @ApiResponse({ status: 200, type: DeleteAccountResponseDto })
+  @ApiResponse({
+    status: 400,
+    description: 'Validation failed, or missing re-authentication (currentPassword / confirm)',
+  })
+  @ApiResponse({
+    status: 401,
+    description: 'Missing/invalid access token or wrong current password',
+  })
+  @ApiResponse({ status: 429, description: 'Too many requests' })
+  deleteAccount(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: DeleteAccountDto,
+  ): Promise<DeleteAccountResponseDto> {
+    return this.authService.deleteAccount(user.userId, dto);
   }
 }
