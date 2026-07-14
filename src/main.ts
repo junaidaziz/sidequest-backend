@@ -22,8 +22,10 @@ async function bootstrap() {
   // Swagger UI below, which relies on inline scripts that the default CSP
   // blocks — the documented NestJS+Swagger+Helmet pattern. Every other
   // helmet protection (X-Content-Type-Options, X-Frame-Options, HSTS, etc.)
-  // stays on. TODO: if an HTML route besides Swagger is ever added, scope
-  // this to /docs only instead of disabling CSP globally.
+  // stays on. If an HTML route besides Swagger is ever added, scope this to
+  // /docs only instead of disabling CSP globally — deliberately not done here
+  // since no such route exists yet and scoping it prematurely would just be
+  // unused complexity.
   app.use(helmet({ contentSecurityPolicy: false }));
 
   // Native mobile clients don't send an Origin header and are unaffected by
