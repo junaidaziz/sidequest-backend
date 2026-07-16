@@ -1,10 +1,10 @@
 # sidequest-backend
 
-NestJS + Prisma + PostgreSQL backend for SideQuest, a real-world mission generator app. Provides auth (guest + email/password), curated mission generation, proof submission with S3-backed photo storage, XP/streak tracking, and a Home aggregation endpoint. See `../mobileApp` for the Expo client that consumes this API.
+NestJS + Prisma + PostgreSQL backend for SideQuest, a real-world mission generator app. Provides auth (guest + email/password + Google, plus account deletion), curated mission generation, proof submission with S3-backed photo storage, XP/streak tracking, a peer-to-peer Tasks/Challenges system, in-app + push notifications, Stripe payment-methods-on-file, a referral program, and a Home aggregation endpoint. See `../mobileApp` for the Expo client that consumes this API, and `CLAUDE.md` / `../.claude/contracts/api-contract.md` for the full module-by-module and endpoint-by-endpoint reference.
 
 ## Stack
 
-NestJS 11 · Prisma 5 · PostgreSQL 16 · Redis 7 (caching) · S3-compatible object storage (LocalStack in dev, real AWS in production) · JWT auth · Swagger (dev/test only) · Jest
+NestJS 11 · Prisma 5 · PostgreSQL 16 · Redis 7 (caching + BullMQ queues) · S3-compatible object storage (LocalStack in dev, real AWS in production) · Stripe (SetupIntent/PaymentMethods only — no charges) · Expo push service (`expo-server-sdk`) · JWT auth · Swagger (dev/test only) · Jest
 
 ## Setup
 
@@ -46,26 +46,44 @@ Clean Architecture: thin controllers, business logic in services, Prisma as the 
 - **Auth** (`src/auth`) — a single `User` table represents both guests and full accounts. A guest session is just an anonymous JWT (`isGuest: true`); signing up upgrades the same row in place rather than creating a new user, so mission history and XP carry over. Access + refresh tokens share a secret, disambiguated by a `type` claim; refresh tokens are stored server-side only as `bcrypt(sha256(rawToken))`, never raw.
 - **Missions** (`src/missions`) — a curated, seeded mission pool filtered in-memory by crew/time/setting/budget context. `MissionPoolService` caches the active pool in Redis (60s default TTL, `MISSION_POOL_CACHE_TTL_SECONDS` to override) with a strictly best-effort read/write path — any Redis error falls straight through to Postgres.
 - **Proof** (`src/proof`) — photo (uploaded to S3) or text proof submission, flat XP award, UTC-calendar-day streak calculation, and a one-free-completion guest gate enforced via a row-locked (`SELECT ... FOR UPDATE`) transaction to close a TOCTOU race under concurrent requests.
-- **Home** (`src/home`) — a single aggregation endpoint (level, streak, a deterministic "today's mission" pick, and saved-mission packs grouped by shared tags) so the mobile Home screen needs one request instead of four.
+- **Home** (`src/home`) — a single aggregation endpoint (level, streak, a deterministic "today's mission" pick, saved-mission packs grouped by shared tags, and task stats) so the mobile Home screen needs one request instead of several.
 - **Storage** (`src/storage`) — a thin wrapper over the AWS SDK S3 client, driven entirely by env vars so the same code runs against LocalStack in dev/test and real S3 in production.
+- **Admin/Verification** (`src/admin`, `src/verification`) — a single shared-secret-gated (`x-admin-key`) route to manually approve/reject a Pending proof completion, racing a BullMQ delayed auto-approve job (default 24h timeout) via row-level locking so exactly one of the two ever resolves a given completion.
+- **Tasks** (`src/tasks`) — the peer-to-peer feature the mobile app calls "Challenges": create a task, generate a shareable invite link, accept/decline, submit evidence (photo/notes), and creator-approval review — full lifecycle, all JWT-guarded, idempotency-key-aware throughout.
+- **Notifications** (`src/notifications`) — in-app notification inbox plus best-effort push delivery via a BullMQ queue and the Expo push service, behind a swappable `PushProviderClient` interface.
+- **Payment** (`src/payment`) — Stripe SetupIntent + saved-card management only; there is no charge/checkout endpoint anywhere in this module or the codebase.
+- **Referrals** (`src/referrals`) — lazily-minted referral codes, invite-channel analytics, and a DB-configurable reward rule (currently: 50 XP to the referrer on the referee's first approved completion).
+- **Idempotency** (`src/idempotency`) — a cross-cutting reserve-then-execute mechanism (an `Idempotency-Key` header, checked before a mutation runs, not just after) reused by proof submission and nearly every Tasks/Referrals mutation.
 
 ## API surface
+
+The table below is a quick-reference summary only — see `../.claude/contracts/api-contract.md` for the full request/response shape of every endpoint, or Swagger (`/docs`, dev/test only).
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
 | POST | `/auth/guest` | — | Bootstrap an anonymous guest session |
 | POST | `/auth/signup` | — | Register (upgrades a guest bearer token in place if present) |
 | POST | `/auth/login` | — | Email + password |
+| POST | `/auth/google` | — | Verifies a Google ID token server-side |
 | POST | `/auth/refresh` | — | Rotate a refresh token |
+| POST | `/auth/logout` | Bearer | Revokes refresh token, best-effort deregisters push token |
 | GET | `/auth/me` | Bearer | Current user's profile |
+| PATCH | `/auth/me` | Bearer | Update display name |
+| PATCH | `/auth/password` | Bearer | Change password |
+| DELETE | `/auth/me` | Bearer | Soft-delete + anonymize account |
+| GET | `/home` | Bearer | Aggregated Home screen payload |
 | POST | `/missions/generate` | — | Up to 3 missions matching an onboarding context |
+| GET | `/missions/saved` | Bearer | Paginated saved-missions list |
 | POST | `/missions/:missionId/save` | Bearer | Bookmark a mission (idempotent) |
 | DELETE | `/missions/:missionId/save` | Bearer | Un-bookmark (idempotent) |
 | POST | `/missions/:missionId/proof` | Bearer | Submit photo/text proof, awards XP |
-| GET | `/home` | Bearer | Aggregated Home screen payload |
+| PATCH | `/admin/completions/:id/verification` | `x-admin-key` | Manual approve/reject override |
+| POST/GET/PATCH/DELETE | `/tasks*` | Bearer | Full Challenges lifecycle — see contract doc |
+| GET/PATCH/POST | `/notifications*` | Bearer | Inbox, unread count, preferences, push tokens |
+| POST/GET/DELETE/PATCH | `/payment*` | Bearer | SetupIntent + saved-card management |
+| POST/DELETE | `/users/me/avatar` | Bearer | Avatar upload/remove |
+| GET/POST | `/referrals*` | Bearer | Referral code, history, invite analytics |
 | GET | `/health` | — | Liveness check |
-
-Full request/response shapes are in Swagger (`/docs`, dev/test only) or the DTOs under each module's `dto/` directory.
 
 ## Testing
 
