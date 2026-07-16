@@ -392,6 +392,10 @@ model ReferralReward {
   type       String // "xp" for v1 (Decision 3); other currencies reserved
   amount     Int?
   grantedAt  DateTime @default(now())
+
+  // Backs GET /referrals/me's aggregate(where: { userId, type }) — one of the
+  // more frequently-hit endpoints.
+  @@index([userId])
 }
 
 /// Backend-configurable reward rules (a DB table, not env vars, so ops can
@@ -468,6 +472,9 @@ model PushToken {
 
   @@unique([userId, token])
   @@index([userId])
+  // Looked up by token alone (not scoped to userId) when the push provider
+  // reports a token as invalid — the composite index above can't serve that.
+  @@index([token])
 }
 
 /// Per-user push/notification preferences (M21 / consumed by M22 Settings).
