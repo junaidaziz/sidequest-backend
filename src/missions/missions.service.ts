@@ -5,7 +5,12 @@ import { BudgetValue, GenerateMissionsDto, TimeValue } from './dto/generate-miss
 import { MissionPoolService } from './mission-pool.service';
 import { GenerateMissionsResponseDto } from './dto/mission-response.dto';
 import { SaveMissionResponseDto } from './dto/save-mission-response.dto';
+import { ListSavedMissionsQueryDto } from './dto/list-saved-missions-query.dto';
+import { PaginatedSavedMissionsDto } from './dto/saved-mission-response.dto';
 import { toMissionResponse } from './mission-response.mapper';
+
+/** Default page size for GET /missions/saved, matching notifications' list default. */
+const DEFAULT_SAVED_LIST_LIMIT = 20;
 
 /** Max mission length (in minutes) a given time budget is willing to see. */
 const TIME_CEILINGS: Record<TimeValue, number> = {
@@ -101,6 +106,41 @@ export class MissionsService {
 
     this.logger.log(`Mission ${missionId} unsaved for user ${userId}`);
     return { saved: false };
+  }
+
+  /**
+   * The caller's saved missions, newest-saved-first. Scoped to missions that
+   * are still active and not soft-deleted — the same guard saveMission()
+   * already enforces before a bookmark can be created, so a saved row can
+   * only go stale here if a mission is deactivated *after* being saved. That
+   * row is quietly excluded (not surfaced as an "unavailable" placeholder)
+   * rather than shown as something the caller can no longer act on.
+   */
+  async listSaved(
+    userId: string,
+    query: ListSavedMissionsQueryDto,
+  ): Promise<PaginatedSavedMissionsDto> {
+    const limit = query.limit ?? DEFAULT_SAVED_LIST_LIMIT;
+    const offset = query.offset ?? 0;
+    const where = { userId, mission: { isActive: true, deletedAt: null } };
+
+    const [rows, total] = await Promise.all([
+      this.prisma.savedMission.findMany({
+        where,
+        include: { mission: true },
+        orderBy: { savedAt: 'desc' },
+        take: limit,
+        skip: offset,
+      }),
+      this.prisma.savedMission.count({ where }),
+    ]);
+
+    return {
+      items: rows.map((row) => ({ ...toMissionResponse(row.mission), savedAt: row.savedAt })),
+      total,
+      limit,
+      offset,
+    };
   }
 
   /** True when a mission satisfies all four context rules simultaneously. */

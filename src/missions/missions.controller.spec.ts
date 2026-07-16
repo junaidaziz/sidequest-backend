@@ -30,14 +30,18 @@ describe('MissionsController', () => {
   let generate: jest.Mock;
   let saveMission: jest.Mock;
   let unsaveMission: jest.Mock;
+  let listSaved: jest.Mock;
 
   beforeEach(async () => {
     generate = jest.fn().mockResolvedValue(RESULT);
     saveMission = jest.fn().mockResolvedValue({ saved: true });
     unsaveMission = jest.fn().mockResolvedValue({ saved: false });
+    listSaved = jest.fn().mockResolvedValue({ items: [], total: 0, limit: 20, offset: 0 });
     const module: TestingModule = await Test.createTestingModule({
       controllers: [MissionsController],
-      providers: [{ provide: MissionsService, useValue: { generate, saveMission, unsaveMission } }],
+      providers: [
+        { provide: MissionsService, useValue: { generate, saveMission, unsaveMission, listSaved } },
+      ],
     }).compile();
 
     controller = module.get(MissionsController);
@@ -70,5 +74,15 @@ describe('MissionsController', () => {
 
     expect(unsaveMission).toHaveBeenCalledWith('user-1', MISSION_ID);
     expect(result).toEqual({ saved: false });
+  });
+
+  it('GET /missions/saved forwards user id + query to the service', async () => {
+    const page = { items: [], total: 0, limit: 5, offset: 10 };
+    listSaved.mockResolvedValue(page);
+
+    const result = await controller.listSaved(USER, { limit: 5, offset: 10 });
+
+    expect(listSaved).toHaveBeenCalledWith('user-1', { limit: 5, offset: 10 });
+    expect(result).toBe(page);
   });
 });

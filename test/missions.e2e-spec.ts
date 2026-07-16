@@ -222,4 +222,92 @@ describe('Missions (e2e)', () => {
       expect(rows).toBe(0);
     });
   });
+
+  describe('GET /missions/saved', () => {
+    it('returns 401 without an access token', async () => {
+      await request(app.getHttpServer()).get('/missions/saved').expect(401);
+    });
+
+    it("returns only the caller's own saved missions, newest first, in the mobile short-field shape", async () => {
+      const { token } = await createGuest();
+      const missions = await prisma.mission.findMany({
+        where: { title: { in: seededTitles } },
+        orderBy: { title: 'asc' },
+      });
+      const [first, second] = missions;
+
+      await request(app.getHttpServer())
+        .post(`/missions/${first.id}/save`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      await request(app.getHttpServer())
+        .post(`/missions/${second.id}/save`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+
+      const res = await request(app.getHttpServer())
+        .get('/missions/saved')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+
+      expect(res.body.total).toBe(2);
+      expect(res.body.limit).toBe(20);
+      expect(res.body.offset).toBe(0);
+      // Newest-saved-first: second.id was saved after first.id.
+      expect(res.body.items.map((m: { id: string }) => m.id)).toEqual([second.id, first.id]);
+      expect(res.body.items[0]).toEqual({
+        id: second.id,
+        category: 'discover',
+        title: second.title,
+        desc: 'Short teaser.',
+        full: 'The full brief.',
+        proof: 'A photo.',
+        time: '15 min',
+        xp: expect.any(String),
+        diff: 'Easy',
+        dots: 1,
+        savedAt: expect.any(String),
+      });
+    });
+
+    it("does not return another user's saved missions", async () => {
+      const owner = await createGuest();
+      const other = await createGuest();
+      await request(app.getHttpServer())
+        .post(`/missions/${missionAId}/save`)
+        .set('Authorization', `Bearer ${owner.token}`)
+        .expect(200);
+
+      const res = await request(app.getHttpServer())
+        .get('/missions/saved')
+        .set('Authorization', `Bearer ${other.token}`)
+        .expect(200);
+
+      expect(res.body.items).toEqual([]);
+      expect(res.body.total).toBe(0);
+    });
+
+    it('respects an explicit limit/offset', async () => {
+      const { token } = await createGuest();
+      const missions = await prisma.mission.findMany({
+        where: { title: { in: seededTitles } },
+      });
+      for (const mission of missions) {
+        await request(app.getHttpServer())
+          .post(`/missions/${mission.id}/save`)
+          .set('Authorization', `Bearer ${token}`)
+          .expect(200);
+      }
+
+      const res = await request(app.getHttpServer())
+        .get('/missions/saved?limit=1&offset=1')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+
+      expect(res.body.items).toHaveLength(1);
+      expect(res.body.limit).toBe(1);
+      expect(res.body.offset).toBe(1);
+      expect(res.body.total).toBe(2);
+    });
+  });
 });

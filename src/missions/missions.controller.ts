@@ -2,11 +2,13 @@ import {
   Body,
   Controller,
   Delete,
+  Get,
   HttpCode,
   HttpStatus,
   Param,
   ParseUUIDPipe,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
@@ -17,6 +19,8 @@ import { AuthUser } from '../auth/types/jwt-payload.interface';
 import { GenerateMissionsDto } from './dto/generate-missions.dto';
 import { GenerateMissionsResponseDto } from './dto/mission-response.dto';
 import { SaveMissionResponseDto } from './dto/save-mission-response.dto';
+import { ListSavedMissionsQueryDto } from './dto/list-saved-missions-query.dto';
+import { PaginatedSavedMissionsDto } from './dto/saved-mission-response.dto';
 import { MissionsService } from './missions.service';
 
 /** Unauthenticated and hit on every context-selection screen — tighter than
@@ -49,6 +53,23 @@ export class MissionsController {
   })
   generate(@Body() dto: GenerateMissionsDto): Promise<GenerateMissionsResponseDto> {
     return this.missionsService.generate(dto);
+  }
+
+  /**
+   * The caller's saved missions, newest-saved-first. Excludes missions that
+   * were deactivated after being saved — see MissionsService.listSaved().
+   */
+  @Get('saved')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: "List the current user's saved missions" })
+  @ApiResponse({ status: 200, type: PaginatedSavedMissionsDto })
+  @ApiResponse({ status: 401, description: 'Missing or invalid access token' })
+  listSaved(
+    @CurrentUser() user: AuthUser,
+    @Query() query: ListSavedMissionsQueryDto,
+  ): Promise<PaginatedSavedMissionsDto> {
+    return this.missionsService.listSaved(user.userId, query);
   }
 
   /**

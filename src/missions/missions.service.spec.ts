@@ -47,12 +47,16 @@ describe('MissionsService', () => {
   let findUnique: jest.Mock;
   let upsert: jest.Mock;
   let deleteMany: jest.Mock;
+  let findMany: jest.Mock;
+  let count: jest.Mock;
 
   beforeEach(async () => {
     getActivePool = jest.fn();
     findUnique = jest.fn();
     upsert = jest.fn();
     deleteMany = jest.fn();
+    findMany = jest.fn();
+    count = jest.fn();
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         MissionsService,
@@ -60,7 +64,7 @@ describe('MissionsService', () => {
           provide: PrismaService,
           useValue: {
             mission: { findUnique },
-            savedMission: { upsert, deleteMany },
+            savedMission: { upsert, deleteMany, findMany, count },
           },
         },
         {
@@ -325,6 +329,68 @@ describe('MissionsService', () => {
       expect(first).toEqual({ saved: false });
       expect(second).toEqual({ saved: false });
       expect(deleteMany).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('listSaved', () => {
+    const SAVED_AT = new Date('2026-07-15T10:00:00.000Z');
+
+    it('scopes to the caller, orders newest-saved-first, and applies default pagination', async () => {
+      findMany.mockResolvedValue([
+        { savedAt: SAVED_AT, mission: makeMission({ id: 'm1', title: 'Find the Oldest Thing' }) },
+      ]);
+      count.mockResolvedValue(1);
+
+      const res = await service.listSaved(USER_ID, {});
+
+      expect(findMany).toHaveBeenCalledWith({
+        where: { userId: USER_ID, mission: { isActive: true, deletedAt: null } },
+        include: { mission: true },
+        orderBy: { savedAt: 'desc' },
+        take: 20,
+        skip: 0,
+      });
+      expect(count).toHaveBeenCalledWith({
+        where: { userId: USER_ID, mission: { isActive: true, deletedAt: null } },
+      });
+      expect(res).toEqual({
+        items: [
+          {
+            id: 'm1',
+            category: 'explore',
+            title: 'Find the Oldest Thing',
+            desc: 'Short teaser.',
+            full: 'The full brief.',
+            proof: 'A photo.',
+            time: '10 min',
+            xp: '+40 XP',
+            diff: 'Easy',
+            dots: 1,
+            savedAt: SAVED_AT,
+          },
+        ],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      });
+    });
+
+    it('honors an explicit limit/offset', async () => {
+      findMany.mockResolvedValue([]);
+      count.mockResolvedValue(0);
+
+      await service.listSaved(USER_ID, { limit: 5, offset: 10 });
+
+      expect(findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 5, skip: 10 }));
+    });
+
+    it('returns an empty page (not an error) when nothing is saved', async () => {
+      findMany.mockResolvedValue([]);
+      count.mockResolvedValue(0);
+
+      const res = await service.listSaved(USER_ID, {});
+
+      expect(res).toEqual({ items: [], total: 0, limit: 20, offset: 0 });
     });
   });
 });
