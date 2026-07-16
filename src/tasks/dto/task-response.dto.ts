@@ -108,3 +108,18 @@ export class TaskDetailDto extends TaskDto {
   @ApiProperty({ type: [TaskSubmissionDto] })
   submissions!: TaskSubmissionDto[];
 }
+
+/** Paginated, newest-created-first envelope for `GET /tasks`. */
+export class PaginatedTasksDto {
+  @ApiProperty({ type: [TaskDto] })
+  items!: TaskDto[];
+
+  @ApiProperty({ example: 42, description: "Total tasks matching the caller's filters." })
+  total!: number;
+
+  @ApiProperty({ example: 20 })
+  limit!: number;
+
+  @ApiProperty({ example: 0 })
+  offset!: number;
+}

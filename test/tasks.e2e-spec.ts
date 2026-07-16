@@ -148,6 +148,76 @@ describe('User tasks (e2e)', () => {
     });
   });
 
+  describe('GET /tasks — pagination', () => {
+    it('returns 401 without an access token', async () => {
+      await request(app.getHttpServer()).get('/tasks').expect(401);
+    });
+
+    it("paginates the caller's own tasks, newest-created-first, with a default limit of 20", async () => {
+      const { token } = await createGuest();
+      for (const title of ['First', 'Second', 'Third']) {
+        await request(app.getHttpServer())
+          .post('/tasks')
+          .set('Authorization', auth(token))
+          .send({ title })
+          .expect(201);
+      }
+
+      const res = await request(app.getHttpServer())
+        .get('/tasks')
+        .set('Authorization', auth(token))
+        .expect(200);
+
+      expect(res.body.total).toBe(3);
+      expect(res.body.limit).toBe(20);
+      expect(res.body.offset).toBe(0);
+      expect(res.body.items.map((t: { title: string }) => t.title)).toEqual([
+        'Third',
+        'Second',
+        'First',
+      ]);
+    });
+
+    it('respects an explicit limit/offset', async () => {
+      const { token } = await createGuest();
+      for (const title of ['A', 'B', 'C']) {
+        await request(app.getHttpServer())
+          .post('/tasks')
+          .set('Authorization', auth(token))
+          .send({ title })
+          .expect(201);
+      }
+
+      const res = await request(app.getHttpServer())
+        .get('/tasks?limit=1&offset=1')
+        .set('Authorization', auth(token))
+        .expect(200);
+
+      expect(res.body.items).toHaveLength(1);
+      expect(res.body.limit).toBe(1);
+      expect(res.body.offset).toBe(1);
+      expect(res.body.total).toBe(3);
+    });
+
+    it("does not return another user's tasks", async () => {
+      const owner = await createGuest();
+      const other = await createGuest();
+      await request(app.getHttpServer())
+        .post('/tasks')
+        .set('Authorization', auth(owner.token))
+        .send({ title: 'Private to owner' })
+        .expect(201);
+
+      const res = await request(app.getHttpServer())
+        .get('/tasks')
+        .set('Authorization', auth(other.token))
+        .expect(200);
+
+      expect(res.body.items).toEqual([]);
+      expect(res.body.total).toBe(0);
+    });
+  });
+
   describe('M19.3 — invite flow', () => {
     it('binds the assignee on accept and rejects a second invite/accept with 409', async () => {
       const { token: creatorToken } = await createGuest();

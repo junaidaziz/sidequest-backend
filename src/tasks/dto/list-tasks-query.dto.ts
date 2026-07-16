@@ -1,6 +1,7 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { UserTaskStatus } from '@prisma/client';
-import { IsEnum, IsIn, IsOptional } from 'class-validator';
+import { Type } from 'class-transformer';
+import { IsEnum, IsIn, IsInt, IsOptional, Max, Min } from 'class-validator';
 
 /** Which side of a task the caller wants listed. */
 export type TaskRoleFilter = 'creator' | 'assignee' | 'all';
@@ -25,4 +26,24 @@ export class ListTasksQueryDto {
   @IsOptional()
   @IsIn(TASK_ROLE_FILTERS)
   role?: TaskRoleFilter;
+
+  @ApiPropertyOptional({
+    minimum: 1,
+    maximum: 100,
+    default: 20,
+    description: 'Max records to return.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  limit?: number;
+
+  @ApiPropertyOptional({ minimum: 0, default: 0, description: 'Records to skip.' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  offset?: number;
 }

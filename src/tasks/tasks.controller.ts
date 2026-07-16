@@ -41,7 +41,12 @@ import { ListTasksQueryDto } from './dto/list-tasks-query.dto';
 import { SubmitTaskEvidenceDto } from './dto/submit-task-evidence.dto';
 import { ReviewSubmissionDto } from './dto/review-submission.dto';
 import { InviteResponseDto } from './dto/invite-response.dto';
-import { TaskDetailDto, TaskDto, TaskSubmissionDto } from './dto/task-response.dto';
+import {
+  PaginatedTasksDto,
+  TaskDetailDto,
+  TaskDto,
+  TaskSubmissionDto,
+} from './dto/task-response.dto';
 import { TaskSummaryDto } from './dto/task-summary.dto';
 import { TasksService } from './tasks.service';
 
@@ -94,9 +99,12 @@ export class TasksController {
   @ApiOperation({
     summary: 'List tasks where the caller is creator or assignee; filter by status.',
   })
-  @ApiResponse({ status: 200, type: [TaskDto] })
+  @ApiResponse({ status: 200, type: PaginatedTasksDto })
   @ApiResponse({ status: 401, description: 'Missing or invalid access token' })
-  listTasks(@CurrentUser() user: AuthUser, @Query() query: ListTasksQueryDto): Promise<TaskDto[]> {
+  listTasks(
+    @CurrentUser() user: AuthUser,
+    @Query() query: ListTasksQueryDto,
+  ): Promise<PaginatedTasksDto> {
     return this.tasksService.listTasks(user.userId, query);
   }
 

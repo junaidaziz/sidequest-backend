@@ -26,7 +26,12 @@ import { ListTasksQueryDto } from './dto/list-tasks-query.dto';
 import { SubmitTaskEvidenceDto } from './dto/submit-task-evidence.dto';
 import { ReviewSubmissionDto } from './dto/review-submission.dto';
 import { InviteResponseDto } from './dto/invite-response.dto';
-import { TaskDetailDto, TaskDto, TaskSubmissionDto } from './dto/task-response.dto';
+import {
+  PaginatedTasksDto,
+  TaskDetailDto,
+  TaskDto,
+  TaskSubmissionDto,
+} from './dto/task-response.dto';
 import {
   AssignedTaskSummaryDto,
   CreatedTaskSummaryDto,
@@ -35,6 +40,9 @@ import {
 
 /** Deep-link scheme the mobile app registers; embedded in a shared invite URL. */
 const INVITE_URL_PREFIX = 'sidequest://tasks/invite/';
+
+/** Default page size for GET /tasks, matching every other list endpoint's default. */
+const DEFAULT_TASK_LIST_LIMIT = 20;
 
 /** Statuses from which a doer may submit (or resubmit) evidence. */
 const SUBMITTABLE_STATUSES: readonly UserTaskStatus[] = [
@@ -114,7 +122,7 @@ export class TasksService {
     });
   }
 
-  async listTasks(userId: string, query: ListTasksQueryDto): Promise<TaskDto[]> {
+  async listTasks(userId: string, query: ListTasksQueryDto): Promise<PaginatedTasksDto> {
     const role = query.role ?? 'all';
     const roleWhere: Prisma.UserTaskWhereInput =
       role === 'creator'
@@ -123,15 +131,25 @@ export class TasksService {
           ? { assigneeId: userId }
           : { OR: [{ creatorId: userId }, { assigneeId: userId }] };
 
-    const tasks = await this.prisma.userTask.findMany({
-      where: {
-        deletedAt: null,
-        ...roleWhere,
-        ...(query.status ? { status: query.status } : {}),
-      },
-      orderBy: { createdAt: 'desc' },
-    });
-    return tasks.map((task) => this.mapTask(task));
+    const limit = query.limit ?? DEFAULT_TASK_LIST_LIMIT;
+    const offset = query.offset ?? 0;
+    const where: Prisma.UserTaskWhereInput = {
+      deletedAt: null,
+      ...roleWhere,
+      ...(query.status ? { status: query.status } : {}),
+    };
+
+    const [tasks, total] = await Promise.all([
+      this.prisma.userTask.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+        skip: offset,
+      }),
+      this.prisma.userTask.count({ where }),
+    ]);
+
+    return { items: tasks.map((task) => this.mapTask(task)), total, limit, offset };
   }
 
   async getTask(userId: string, taskId: string): Promise<TaskDetailDto> {

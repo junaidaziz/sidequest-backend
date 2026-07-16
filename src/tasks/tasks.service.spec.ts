@@ -54,7 +54,13 @@ describe('TasksService', () => {
   let service: TasksService;
   let tx: Tx;
   let prisma: {
-    userTask: { findUnique: jest.Mock; findMany: jest.Mock; update: jest.Mock; groupBy: jest.Mock };
+    userTask: {
+      findUnique: jest.Mock;
+      findMany: jest.Mock;
+      update: jest.Mock;
+      groupBy: jest.Mock;
+      count: jest.Mock;
+    };
     userTaskSubmission: { count: jest.Mock };
     $transaction: jest.Mock;
   };
@@ -87,6 +93,7 @@ describe('TasksService', () => {
         findMany: jest.fn(),
         update: jest.fn(),
         groupBy: jest.fn(),
+        count: jest.fn().mockResolvedValue(0),
       },
       userTaskSubmission: { count: jest.fn() },
       $transaction: jest.fn(async (cb: (t: Tx) => Promise<unknown>) => cb(tx)),
@@ -167,6 +174,44 @@ describe('TasksService', () => {
       const where = prisma.userTask.findMany.mock.calls[0][0].where;
       expect(where.OR).toEqual([{ creatorId: CREATOR }, { assigneeId: CREATOR }]);
       expect(where.status).toBe(UserTaskStatus.Approved);
+    });
+
+    it('applies default pagination and returns the paginated envelope', async () => {
+      prisma.userTask.findMany.mockResolvedValue([baseTask()]);
+      prisma.userTask.count.mockResolvedValue(1);
+
+      const res = await service.listTasks(CREATOR, {});
+
+      expect(prisma.userTask.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ take: 20, skip: 0 }),
+      );
+      expect(prisma.userTask.count).toHaveBeenCalledWith({
+        where: prisma.userTask.findMany.mock.calls[0][0].where,
+      });
+      expect(res).toEqual(
+        expect.objectContaining({ total: 1, limit: 20, offset: 0, items: expect.any(Array) }),
+      );
+      expect(res.items).toHaveLength(1);
+    });
+
+    it('honors an explicit limit/offset', async () => {
+      prisma.userTask.findMany.mockResolvedValue([]);
+      prisma.userTask.count.mockResolvedValue(0);
+
+      await service.listTasks(CREATOR, { limit: 5, offset: 10 });
+
+      expect(prisma.userTask.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ take: 5, skip: 10 }),
+      );
+    });
+
+    it('returns an empty page (not an error) when nothing matches', async () => {
+      prisma.userTask.findMany.mockResolvedValue([]);
+      prisma.userTask.count.mockResolvedValue(0);
+
+      const res = await service.listTasks(CREATOR, {});
+
+      expect(res).toEqual({ items: [], total: 0, limit: 20, offset: 0 });
     });
   });
 
