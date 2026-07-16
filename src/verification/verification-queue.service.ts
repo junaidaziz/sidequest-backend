@@ -57,7 +57,14 @@ export class VerificationQueueService {
         // not a hypothetical. '-' is safe and keeps the id human-readable.
         jobId: `${AUTO_APPROVE_JOB}-${completionId}`,
         removeOnComplete: true,
-        removeOnFail: false,
+        // A transient failure (e.g. a brief Postgres blip) must not
+        // permanently strand a completion in Pending — retry with backoff
+        // before giving up. Failed jobs are still kept (not
+        // removeOnFail: true) for operator visibility, but bounded so Redis
+        // doesn't accumulate them forever.
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 5_000 },
+        removeOnFail: { count: 1_000 },
       },
     );
     this.logger.log(`Scheduled auto-approval for completion ${completionId} in ${delay}ms`);

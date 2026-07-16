@@ -61,7 +61,13 @@ export class NotificationsQueueService {
         // queue); keep the same safe separator here.
         jobId: `${SEND_PUSH_JOB}-${notificationId}`,
         removeOnComplete: true,
-        removeOnFail: false,
+        // Retry a transient send failure with backoff rather than dropping
+        // the push permanently on the first hiccup; bounded failed-job
+        // retention so Redis doesn't grow unboundedly (matches
+        // VerificationQueueService's convention).
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 5_000 },
+        removeOnFail: { count: 1_000 },
       },
     );
     this.logger.log(`Enqueued push delivery for notification ${notificationId}`);
@@ -87,7 +93,9 @@ export class NotificationsQueueService {
         delay,
         jobId: `${CHECK_RECEIPTS_JOB}-${randomUUID()}`,
         removeOnComplete: true,
-        removeOnFail: false,
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 5_000 },
+        removeOnFail: { count: 1_000 },
       },
     );
     this.logger.log(`Scheduled receipt check for ${receiptIds.length} ticket(s) in ${delay}ms`);

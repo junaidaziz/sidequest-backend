@@ -37,6 +37,9 @@ describe('NotificationsQueueService', () => {
       expect(opts.jobId).toBe(`${SEND_PUSH_JOB}-${NOTIFICATION_ID}`);
       expect(opts.jobId).not.toContain(':');
       expect(opts.delay).toBeUndefined();
+      expect(opts.attempts).toBe(3);
+      expect(opts.backoff).toEqual({ type: 'exponential', delay: 5_000 });
+      expect(opts.removeOnFail).toEqual({ count: 1_000 });
     });
   });
 
@@ -60,6 +63,9 @@ describe('NotificationsQueueService', () => {
       expect(opts.delay).toBe(30 * MINUTE_MS);
       expect(opts.jobId).toContain(CHECK_RECEIPTS_JOB);
       expect(opts.jobId).not.toContain(':');
+      expect(opts.attempts).toBe(3);
+      expect(opts.backoff).toEqual({ type: 'exponential', delay: 5_000 });
+      expect(opts.removeOnFail).toEqual({ count: 1_000 });
     });
 
     it('falls back to the 15-minute default when the env var is unset', async () => {

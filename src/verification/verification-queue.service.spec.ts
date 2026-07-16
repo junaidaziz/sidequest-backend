@@ -34,6 +34,12 @@ describe('VerificationQueueService', () => {
     // mocked-queue unit test alone did not, since it never exercises BullMQ's
     // own validation).
     expect(opts.jobId).toBe(`${AUTO_APPROVE_JOB}-${COMPLETION_ID}`);
+    // A transient failure (e.g. a brief Postgres blip) must retry with
+    // backoff rather than permanently stranding a completion in Pending;
+    // failed jobs are kept but bounded so Redis doesn't grow forever.
+    expect(opts.attempts).toBe(3);
+    expect(opts.backoff).toEqual({ type: 'exponential', delay: 5_000 });
+    expect(opts.removeOnFail).toEqual({ count: 1_000 });
   });
 
   it('falls back to the 24h default when the env var is unset', async () => {
