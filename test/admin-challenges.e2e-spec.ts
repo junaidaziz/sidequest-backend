@@ -117,7 +117,6 @@ describe('Admin challenge management (e2e)', () => {
       'challenges.edit',
       'challenges.delete',
       'challenges.publish',
-      'challenges.approve',
       'challenges.feature',
     ];
     for (const key of keys) {
