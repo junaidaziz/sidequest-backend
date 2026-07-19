@@ -227,10 +227,16 @@ export class ResetVerificationResponseDto {
   verificationStatus!: VerificationStatus;
 }
 
-/** Generic success acknowledgement for a mutating admin action (e.g. delete). */
-export class AdminActionResponseDto {
-  @ApiProperty({ example: true })
-  success!: boolean;
+/** Aggregate referral counts included in a user data export. */
+export class AdminUserReferralSummaryDto {
+  @ApiProperty({ description: 'Number of referral codes the user owns' })
+  codesMade!: number;
+
+  @ApiProperty({ description: 'Number of successful referral conversions attributed to the user' })
+  conversions!: number;
+
+  @ApiProperty({ description: 'Number of referral rewards the user earned' })
+  rewardsEarned!: number;
 }
 
 /**
@@ -241,12 +247,12 @@ export class AdminActionResponseDto {
  * presigned URLs so the export is directly usable.
  */
 export class AdminUserExportDto {
-  @ApiProperty({ description: 'The full admin detail view of the user' })
+  @ApiProperty({ description: 'The full admin detail view of the user', type: AdminUserDetailDto })
   profile!: AdminUserDetailDto;
 
   @ApiProperty({ type: String, format: 'date-time', description: 'When this export was generated' })
   exportedAt!: Date;
 
-  @ApiProperty({ description: 'Referral summary counts', type: Object })
-  referrals!: { codesMade: number; conversions: number; rewardsEarned: number };
+  @ApiProperty({ description: 'Referral summary counts', type: AdminUserReferralSummaryDto })
+  referrals!: AdminUserReferralSummaryDto;
 }
