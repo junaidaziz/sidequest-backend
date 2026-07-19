@@ -234,7 +234,10 @@ describe('AdminChallengesService', () => {
     it('rejects an inverted date window with 400', async () => {
       await expect(
         service.create(
-          validCreateDto({ startDate: '2026-09-01T00:00:00.000Z', endDate: '2026-08-01T00:00:00.000Z' }),
+          validCreateDto({
+            startDate: '2026-09-01T00:00:00.000Z',
+            endDate: '2026-08-01T00:00:00.000Z',
+          }),
           CTX,
         ),
       ).rejects.toBeInstanceOf(BadRequestException);
@@ -263,13 +266,23 @@ describe('AdminChallengesService', () => {
       prisma.mission.findFirst.mockResolvedValue(buildMission({ isActive: true }));
       prisma.mission.update.mockResolvedValue(buildMission({ isActive: true, description: 'new' }));
 
-      const dto: UpdateMissionDto = { description: 'new', title: 'Renamed', category: 'discover', difficulty: 'Hard' };
+      const dto: UpdateMissionDto = {
+        description: 'new',
+        title: 'Renamed',
+        category: 'discover',
+        difficulty: 'Hard',
+      };
       await service.update('mission-1', dto, CTX);
 
       expect(prisma.mission.update).toHaveBeenCalledWith(
         expect.objectContaining({
           where: { id: 'mission-1' },
-          data: expect.objectContaining({ description: 'new', title: 'Renamed', category: 'discover', difficulty: 'Hard' }),
+          data: expect.objectContaining({
+            description: 'new',
+            title: 'Renamed',
+            category: 'discover',
+            difficulty: 'Hard',
+          }),
         }),
       );
       expect(missionPool.invalidate).toHaveBeenCalled();
@@ -364,14 +377,20 @@ describe('AdminChallengesService', () => {
       tx.$queryRaw.mockResolvedValue([
         { id: 'mission-1', status: MissionStatus.Published, isActive: true, deletedAt: null },
       ]);
-      tx.mission.update.mockResolvedValue(buildMission({ status: MissionStatus.Draft, isActive: false }));
+      tx.mission.update.mockResolvedValue(
+        buildMission({ status: MissionStatus.Draft, isActive: false }),
+      );
 
       const res = await service.unpublish('mission-1', CTX);
 
       expect(res.status).toBe(MissionStatus.Draft);
       expect(tx.mission.update).toHaveBeenCalledWith(
         expect.objectContaining({
-          data: expect.objectContaining({ isActive: false, approvedAt: null, approvedByAdminId: null }),
+          data: expect.objectContaining({
+            isActive: false,
+            approvedAt: null,
+            approvedByAdminId: null,
+          }),
         }),
       );
       expect(missionPool.invalidate).toHaveBeenCalled();
@@ -390,7 +409,9 @@ describe('AdminChallengesService', () => {
       tx.$queryRaw.mockResolvedValue([
         { id: 'mission-1', status: MissionStatus.Published, isActive: true, deletedAt: null },
       ]);
-      tx.mission.update.mockResolvedValue(buildMission({ status: MissionStatus.Archived, isActive: false }));
+      tx.mission.update.mockResolvedValue(
+        buildMission({ status: MissionStatus.Archived, isActive: false }),
+      );
 
       const res = await service.archive('mission-1', CTX);
       expect(res.status).toBe(MissionStatus.Archived);
@@ -430,14 +451,21 @@ describe('AdminChallengesService', () => {
 
     it('404s on a missing mission', async () => {
       prisma.mission.findFirst.mockResolvedValue(null);
-      await expect(service.setFeatured('nope', true, CTX)).rejects.toBeInstanceOf(NotFoundException);
+      await expect(service.setFeatured('nope', true, CTX)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
     });
   });
 
   describe('duplicate', () => {
     it('clones as a Draft with an available (Copy) title, clearing approval', async () => {
       prisma.mission.findFirst.mockResolvedValue(
-        buildMission({ id: 'src', title: 'Original', status: MissionStatus.Published, approvedAt: new Date() }),
+        buildMission({
+          id: 'src',
+          title: 'Original',
+          status: MissionStatus.Published,
+          approvedAt: new Date(),
+        }),
       );
       prisma.mission.findUnique.mockResolvedValue(null); // "(Copy)" is free
       prisma.mission.create.mockResolvedValue(
@@ -471,7 +499,10 @@ describe('AdminChallengesService', () => {
 
     it('deep-clones milestones JSON', async () => {
       prisma.mission.findFirst.mockResolvedValue(
-        buildMission({ title: 'Original', milestones: [{ title: 'step' }] as unknown as Prisma.JsonValue }),
+        buildMission({
+          title: 'Original',
+          milestones: [{ title: 'step' }] as unknown as Prisma.JsonValue,
+        }),
       );
       prisma.mission.findUnique.mockResolvedValue(null);
       prisma.mission.create.mockResolvedValue(buildMission());
