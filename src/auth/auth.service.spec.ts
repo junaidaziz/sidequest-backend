@@ -65,6 +65,10 @@ function buildUser(overrides: Partial<User> = {}): User {
     createdAt: new Date(),
     updatedAt: new Date(),
     deletedAt: null,
+    suspendedAt: null,
+    suspensionReason: null,
+    suspendedByAdminId: null,
+    restrictedFeatures: [],
     ...overrides,
   };
 }
