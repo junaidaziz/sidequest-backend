@@ -97,7 +97,9 @@ export class CmsAnnouncementController {
   }
 
   @Post(':id/publish')
+  @HttpCode(HttpStatus.OK)
   @RequirePermission('cms.publish')
+  @ApiOperation({ summary: 'Publish an announcement' })
   publish(
     @CurrentAdmin() actor: AuthAdmin,
     @Param('id', ParseUUIDPipe) id: string,
@@ -108,7 +110,9 @@ export class CmsAnnouncementController {
   }
 
   @Post(':id/unpublish')
+  @HttpCode(HttpStatus.OK)
   @RequirePermission('cms.publish')
+  @ApiOperation({ summary: 'Unpublish an announcement' })
   unpublish(
     @CurrentAdmin() actor: AuthAdmin,
     @Param('id', ParseUUIDPipe) id: string,

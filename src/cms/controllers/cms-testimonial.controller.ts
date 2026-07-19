@@ -109,7 +109,9 @@ export class CmsTestimonialController {
   }
 
   @Post(':id/publish')
+  @HttpCode(HttpStatus.OK)
   @RequirePermission('cms.publish')
+  @ApiOperation({ summary: 'Publish a testimonial' })
   publish(
     @CurrentAdmin() actor: AuthAdmin,
     @Param('id', ParseUUIDPipe) id: string,
@@ -120,7 +122,9 @@ export class CmsTestimonialController {
   }
 
   @Post(':id/unpublish')
+  @HttpCode(HttpStatus.OK)
   @RequirePermission('cms.publish')
+  @ApiOperation({ summary: 'Unpublish a testimonial' })
   unpublish(
     @CurrentAdmin() actor: AuthAdmin,
     @Param('id', ParseUUIDPipe) id: string,

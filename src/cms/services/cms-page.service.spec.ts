@@ -44,10 +44,16 @@ describe('CmsPageService', () => {
 
   beforeEach(() => {
     delegate = { findFirst: jest.fn(), create: jest.fn(), update: jest.fn() };
-    const prisma = { cmsPage: delegate } as unknown as PrismaService;
+    const prisma = {
+      cmsPage: delegate,
+      $transaction: jest.fn((arr: Promise<unknown>[]) => Promise.all(arr)),
+    } as unknown as PrismaService;
     service = new CmsPageService(
       prisma,
-      { record: jest.fn().mockResolvedValue(undefined) } as unknown as AuditLogService,
+      {
+        record: jest.fn().mockResolvedValue(undefined),
+        buildRecord: jest.fn(() => Promise.resolve({})),
+      } as unknown as AuditLogService,
       { invalidate: jest.fn().mockResolvedValue(undefined) } as unknown as CmsCacheService,
       { trigger: jest.fn() } as unknown as CmsRevalidationService,
     );

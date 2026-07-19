@@ -84,6 +84,7 @@ export class CmsPageController {
   }
 
   @Post(':id/publish')
+  @HttpCode(HttpStatus.OK)
   @RequirePermission('cms.publish')
   @ApiOperation({ summary: 'Publish a page' })
   publish(
@@ -96,6 +97,7 @@ export class CmsPageController {
   }
 
   @Post(':id/unpublish')
+  @HttpCode(HttpStatus.OK)
   @RequirePermission('cms.publish')
   @ApiOperation({ summary: 'Unpublish a page' })
   unpublish(

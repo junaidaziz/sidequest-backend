@@ -48,7 +48,7 @@ type Delegate = {
 describe('CmsFaqService (generic base coverage)', () => {
   let delegate: Delegate;
   let prisma: { cmsFaq: Delegate; $transaction: jest.Mock };
-  let audit: { record: jest.Mock };
+  let audit: { record: jest.Mock; buildRecord: jest.Mock };
   let cache: { invalidate: jest.Mock };
   let revalidation: { trigger: jest.Mock };
   let service: CmsFaqService;
@@ -65,7 +65,10 @@ describe('CmsFaqService (generic base coverage)', () => {
       cmsFaq: delegate,
       $transaction: jest.fn((arr: Promise<unknown>[]) => Promise.all(arr)),
     };
-    audit = { record: jest.fn().mockResolvedValue(undefined) };
+    audit = {
+      record: jest.fn().mockResolvedValue(undefined),
+      buildRecord: jest.fn(() => Promise.resolve({})),
+    };
     cache = { invalidate: jest.fn().mockResolvedValue(undefined) };
     revalidation = { trigger: jest.fn() };
     service = new CmsFaqService(
@@ -104,9 +107,11 @@ describe('CmsFaqService (generic base coverage)', () => {
     const createArg = delegate.create.mock.calls[0][0].data;
     expect(createArg.createdByAdminId).toBe('admin-1');
     expect(createArg.updatedByAdminId).toBe('admin-1');
-    expect(audit.record).toHaveBeenCalledWith(
+    expect(audit.buildRecord).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'cms.edit', targetType: 'CmsFaq' }),
     );
+    // Entity write + audit share one transaction.
+    expect(prisma.$transaction).toHaveBeenCalled();
     expect(cache.invalidate).toHaveBeenCalledWith('faqs');
     expect(revalidation.trigger).toHaveBeenCalledWith(['cms:faqs']);
   });
@@ -144,7 +149,7 @@ describe('CmsFaqService (generic base coverage)', () => {
     await service.remove(actor, 'faq-1', ctx);
     const data = delegate.update.mock.calls[0][0].data;
     expect(data.deletedAt).toBeInstanceOf(Date);
-    expect(audit.record).toHaveBeenCalled();
+    expect(audit.buildRecord).toHaveBeenCalled();
   });
 
   it('publishes: sets status + publishedAt and audits under cms.publish', async () => {
@@ -155,7 +160,9 @@ describe('CmsFaqService (generic base coverage)', () => {
     const data = delegate.update.mock.calls[0][0].data;
     expect(data.status).toBe('Published');
     expect(data.publishedAt).toBeInstanceOf(Date);
-    expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'cms.publish' }));
+    expect(audit.buildRecord).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'cms.publish' }),
+    );
   });
 
   it('unpublishes: clears publishedAt', async () => {

@@ -16,7 +16,9 @@ import { CmsRevalidationService } from './cms-revalidation.service';
 @Injectable()
 export class CmsAnnouncementService extends CmsResourceService<
   CmsAnnouncement,
-  CmsAnnouncementDto
+  CmsAnnouncementDto,
+  CreateCmsAnnouncementDto,
+  UpdateCmsAnnouncementDto
 > {
   protected readonly delegate = this.prisma
     .cmsAnnouncement as unknown as CmsDelegate<CmsAnnouncement>;
@@ -35,8 +37,9 @@ export class CmsAnnouncementService extends CmsResourceService<
     super(prisma, audit, cache, revalidation);
   }
 
-  protected async buildCreateData(dto: unknown): Promise<Record<string, unknown>> {
-    const input = dto as CreateCmsAnnouncementDto;
+  protected async buildCreateData(
+    input: CreateCmsAnnouncementDto,
+  ): Promise<Record<string, unknown>> {
     return {
       kind: input.kind,
       slug: input.slug,
@@ -46,8 +49,9 @@ export class CmsAnnouncementService extends CmsResourceService<
     };
   }
 
-  protected async buildUpdateData(dto: unknown): Promise<Record<string, unknown>> {
-    const input = dto as UpdateCmsAnnouncementDto;
+  protected async buildUpdateData(
+    input: UpdateCmsAnnouncementDto,
+  ): Promise<Record<string, unknown>> {
     const data: Record<string, unknown> = {};
     if (input.kind !== undefined) data.kind = input.kind;
     if (input.slug !== undefined) data.slug = input.slug;

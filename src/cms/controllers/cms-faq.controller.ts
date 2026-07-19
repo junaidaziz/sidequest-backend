@@ -13,7 +13,7 @@ import {
   Post,
   UseGuards,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { CurrentAdmin } from '../../admin-auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../../admin-auth/guards/admin-jwt-auth.guard';
 import { AuthAdmin } from '../../admin-auth/types/admin-jwt-payload.interface';
@@ -34,18 +34,25 @@ export class CmsFaqController {
 
   @Get()
   @RequirePermission('cms.view')
+  @ApiOperation({ summary: 'List all FAQs (drafts included)' })
+  @ApiResponse({ status: 200, type: [CmsFaqDto] })
   list(): Promise<CmsFaqDto[]> {
     return this.service.list();
   }
 
   @Get(':id')
   @RequirePermission('cms.view')
+  @ApiOperation({ summary: 'Get a FAQ by id' })
+  @ApiResponse({ status: 200, type: CmsFaqDto })
+  @ApiResponse({ status: 404, description: 'FAQ not found' })
   get(@Param('id', ParseUUIDPipe) id: string): Promise<CmsFaqDto> {
     return this.service.get(id);
   }
 
   @Post()
   @RequirePermission('cms.edit')
+  @ApiOperation({ summary: 'Create a FAQ (starts as Draft)' })
+  @ApiResponse({ status: 201, type: CmsFaqDto })
   create(
     @CurrentAdmin() actor: AuthAdmin,
     @Body() dto: CreateCmsFaqDto,
@@ -57,6 +64,8 @@ export class CmsFaqController {
 
   @Patch('reorder')
   @RequirePermission('cms.edit')
+  @ApiOperation({ summary: 'Reorder FAQs by sortOrder' })
+  @ApiResponse({ status: 200, type: [CmsFaqDto] })
   reorder(
     @CurrentAdmin() actor: AuthAdmin,
     @Body() dto: ReorderDto,
@@ -68,6 +77,8 @@ export class CmsFaqController {
 
   @Patch(':id')
   @RequirePermission('cms.edit')
+  @ApiOperation({ summary: 'Update a FAQ' })
+  @ApiResponse({ status: 200, type: CmsFaqDto })
   update(
     @CurrentAdmin() actor: AuthAdmin,
     @Param('id', ParseUUIDPipe) id: string,
@@ -81,6 +92,8 @@ export class CmsFaqController {
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
   @RequirePermission('cms.edit')
+  @ApiOperation({ summary: 'Soft-delete a FAQ' })
+  @ApiResponse({ status: 204, description: 'Deleted' })
   remove(
     @CurrentAdmin() actor: AuthAdmin,
     @Param('id', ParseUUIDPipe) id: string,
@@ -91,7 +104,10 @@ export class CmsFaqController {
   }
 
   @Post(':id/publish')
+  @HttpCode(HttpStatus.OK)
   @RequirePermission('cms.publish')
+  @ApiOperation({ summary: 'Publish a FAQ' })
+  @ApiResponse({ status: 200, type: CmsFaqDto })
   publish(
     @CurrentAdmin() actor: AuthAdmin,
     @Param('id', ParseUUIDPipe) id: string,
@@ -102,7 +118,10 @@ export class CmsFaqController {
   }
 
   @Post(':id/unpublish')
+  @HttpCode(HttpStatus.OK)
   @RequirePermission('cms.publish')
+  @ApiOperation({ summary: 'Unpublish a FAQ' })
+  @ApiResponse({ status: 200, type: CmsFaqDto })
   unpublish(
     @CurrentAdmin() actor: AuthAdmin,
     @Param('id', ParseUUIDPipe) id: string,

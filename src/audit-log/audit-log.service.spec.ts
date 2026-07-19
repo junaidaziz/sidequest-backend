@@ -65,6 +65,32 @@ describe('AuditLogService', () => {
     });
   });
 
+  describe('buildRecord', () => {
+    it('returns the un-awaited create promise for transaction enlistment', async () => {
+      const promise = service.buildRecord({
+        actorAdminUserId: 'admin-1',
+        action: 'cms.edit',
+        targetType: 'CmsFaq',
+        targetId: 'faq-1',
+        newValue: { id: 'faq-1', __verb: 'create' },
+        result: AuditResult.Success,
+      });
+      // It delegates to prisma.auditLog.create (whose mock returns a promise).
+      expect(prisma.auditLog.create).toHaveBeenCalledTimes(1);
+      const data = prisma.auditLog.create.mock.calls[0][0].data;
+      expect(data.action).toBe('cms.edit');
+      expect(data.targetId).toBe('faq-1');
+      await expect(promise).resolves.toBeDefined();
+    });
+
+    it('does NOT swallow errors (unlike record) so a failed audit rolls back its tx', async () => {
+      prisma.auditLog.create.mockRejectedValue(new Error('db down'));
+      await expect(
+        service.buildRecord({ actorAdminUserId: 'a', action: 'x', result: AuditResult.Success }),
+      ).rejects.toThrow('db down');
+    });
+  });
+
   describe('list', () => {
     it('applies filters, pagination, and maps entries', async () => {
       prisma.$transaction.mockResolvedValue([

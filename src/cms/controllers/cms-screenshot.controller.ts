@@ -113,7 +113,9 @@ export class CmsScreenshotController {
   }
 
   @Post(':id/publish')
+  @HttpCode(HttpStatus.OK)
   @RequirePermission('cms.publish')
+  @ApiOperation({ summary: 'Publish a screenshot' })
   publish(
     @CurrentAdmin() actor: AuthAdmin,
     @Param('id', ParseUUIDPipe) id: string,
@@ -124,7 +126,9 @@ export class CmsScreenshotController {
   }
 
   @Post(':id/unpublish')
+  @HttpCode(HttpStatus.OK)
   @RequirePermission('cms.publish')
+  @ApiOperation({ summary: 'Unpublish a screenshot' })
   unpublish(
     @CurrentAdmin() actor: AuthAdmin,
     @Param('id', ParseUUIDPipe) id: string,

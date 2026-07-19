@@ -43,8 +43,9 @@ describe('AppConfigService', () => {
       upsert: jest.Mock;
       update: jest.Mock;
     };
+    $transaction: jest.Mock;
   };
-  let audit: { record: jest.Mock };
+  let audit: { record: jest.Mock; buildRecord: jest.Mock };
   let redis: { get: jest.Mock; set: jest.Mock; del: jest.Mock };
   let revalidation: { trigger: jest.Mock };
   let service: AppConfigService;
@@ -58,8 +59,12 @@ describe('AppConfigService', () => {
         upsert: jest.fn(),
         update: jest.fn(),
       },
+      $transaction: jest.fn((arr: Promise<unknown>[]) => Promise.all(arr)),
     };
-    audit = { record: jest.fn().mockResolvedValue(undefined) };
+    audit = {
+      record: jest.fn().mockResolvedValue(undefined),
+      buildRecord: jest.fn(() => Promise.resolve({})),
+    };
     redis = {
       get: jest.fn().mockResolvedValue(null),
       set: jest.fn().mockResolvedValue('OK'),
@@ -101,9 +106,10 @@ describe('AppConfigService', () => {
     prisma.appConfig.findUnique.mockResolvedValue(null);
     prisma.appConfig.upsert.mockResolvedValue(makeConfig({ key: 'appStoreUrl' }));
     await service.upsert(actor, 'appStoreUrl', { value: 'https://apple' }, ctx);
-    expect(audit.record).toHaveBeenCalledWith(
+    expect(audit.buildRecord).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'app_config.manage' }),
     );
+    expect(prisma.$transaction).toHaveBeenCalled();
     expect(redis.del).toHaveBeenCalledWith('config:public');
     expect(revalidation.trigger).toHaveBeenCalledWith(['config:public']);
   });

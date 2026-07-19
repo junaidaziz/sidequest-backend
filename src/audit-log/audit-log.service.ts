@@ -26,27 +26,41 @@ export class AuditLogService {
 
   async record(params: RecordAuditParams): Promise<void> {
     try {
-      await this.prisma.auditLog.create({
-        data: {
-          adminUserId: params.actorAdminUserId,
-          action: params.action,
-          targetType: params.targetType ?? null,
-          targetId: params.targetId ?? null,
-          previousValue: this.toJson(params.previousValue),
-          // result/reason have no dedicated columns on the minimal, immutable
-          // Phase-3 model — fold them into newValue under reserved keys so they
-          // stay queryable (JSON path) without a schema change.
-          newValue: this.buildNewValue(params.newValue, params.result, params.reason),
-          ipAddress: params.ipAddress ?? null,
-          userAgent: params.userAgent ?? null,
-        },
-      });
+      await this.buildRecord(params);
     } catch (error) {
       this.logger.error(
         `Failed to write audit log for action "${params.action}"`,
         error instanceof Error ? error.stack : undefined,
       );
     }
+  }
+
+  /**
+   * Returns the un-awaited `PrismaPromise` for the audit insert instead of running
+   * it best-effort. This lets a caller enlist the audit write in the SAME
+   * `prisma.$transaction([...])` as the primary mutation, so a transient audit
+   * failure rolls the mutation back rather than leaving an un-audited change
+   * committed — used by the CMS/app-config modules, where audit-trail integrity
+   * for admin content edits is treated as a correctness requirement, not a
+   * best-effort side effect. `record()` (above) keeps the best-effort behavior for
+   * callers that prefer it (auth attempts, etc.).
+   */
+  buildRecord(params: RecordAuditParams): Prisma.PrismaPromise<unknown> {
+    return this.prisma.auditLog.create({
+      data: {
+        adminUserId: params.actorAdminUserId,
+        action: params.action,
+        targetType: params.targetType ?? null,
+        targetId: params.targetId ?? null,
+        previousValue: this.toJson(params.previousValue),
+        // result/reason have no dedicated columns on the minimal, immutable
+        // Phase-3 model — fold them into newValue under reserved keys so they
+        // stay queryable (JSON path) without a schema change.
+        newValue: this.buildNewValue(params.newValue, params.result, params.reason),
+        ipAddress: params.ipAddress ?? null,
+        userAgent: params.userAgent ?? null,
+      },
+    });
   }
 
   /** Paginated, filterable, read-only list. No mutation counterpart exists — by design. */

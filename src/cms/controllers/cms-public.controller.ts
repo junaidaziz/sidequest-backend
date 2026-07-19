@@ -1,4 +1,5 @@
 import { Controller, Get, Param, Query } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import {
   PublicAnnouncementDto,
@@ -17,6 +18,9 @@ import { CmsPublicService } from '../services/cms-public.service';
  * server components. Only Published, non-deleted content is ever returned.
  */
 @ApiTags('cms-public')
+// A generous per-IP cap tuned for public SSR/ISR traffic (hit on every cache-miss
+// render), overriding the global throttle which is tuned for the mobile API.
+@Throttle({ default: { limit: 120, ttl: 60_000 } })
 @Controller('cms')
 export class CmsPublicController {
   constructor(private readonly service: CmsPublicService) {}

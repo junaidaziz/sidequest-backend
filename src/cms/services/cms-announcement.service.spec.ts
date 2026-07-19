@@ -52,8 +52,14 @@ describe('CmsAnnouncementService', () => {
       remove: jest.fn().mockResolvedValue(undefined),
     };
     service = new CmsAnnouncementService(
-      { cmsAnnouncement: delegate } as unknown as PrismaService,
-      { record: jest.fn().mockResolvedValue(undefined) } as unknown as AuditLogService,
+      {
+        cmsAnnouncement: delegate,
+        $transaction: jest.fn((arr: Promise<unknown>[]) => Promise.all(arr)),
+      } as unknown as PrismaService,
+      {
+        record: jest.fn().mockResolvedValue(undefined),
+        buildRecord: jest.fn(() => Promise.resolve({})),
+      } as unknown as AuditLogService,
       { invalidate: jest.fn().mockResolvedValue(undefined) } as unknown as CmsCacheService,
       { trigger: jest.fn() } as unknown as CmsRevalidationService,
       assets as unknown as CmsAssetService,

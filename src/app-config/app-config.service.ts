@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { AppConfig, Prisma } from '@prisma/client';
+import { randomUUID } from 'crypto';
 import { AuthAdmin } from '../admin-auth/types/admin-jwt-payload.interface';
 import { AuditLogService } from '../audit-log/audit-log.service';
 import { AuditResult } from '../audit-log/types/audit';
@@ -70,34 +71,41 @@ export class AppConfigService {
       throw new BadRequestException('Invalid config key format');
     }
     const existing = await this.prisma.appConfig.findUnique({ where: { key } });
-    const row = await this.prisma.appConfig.upsert({
-      where: { key },
-      create: {
-        key,
-        value: dto.value,
-        description: dto.description ?? null,
-        createdByAdminId: actor.adminUserId,
-        updatedByAdminId: actor.adminUserId,
-      },
-      update: {
-        value: dto.value,
-        description: dto.description ?? undefined,
-        deletedAt: null,
-        updatedByAdminId: actor.adminUserId,
-      },
-    });
-
-    await this.audit.record({
-      actorAdminUserId: actor.adminUserId,
-      action: 'app_config.manage',
-      targetType: 'AppConfig',
-      targetId: row.id,
-      previousValue: existing ? { key, value: existing.value as Prisma.InputJsonValue } : null,
-      newValue: { key, value: dto.value, __verb: existing ? 'update' : 'create' },
-      result: AuditResult.Success,
-      ipAddress: ctx.ipAddress,
-      userAgent: ctx.userAgent,
-    });
+    // Generate the id up front so the audit targetId is known inside the same
+    // transaction on a first-time create (upsert's create branch uses it).
+    const rowId = existing?.id ?? randomUUID();
+    // Mutation + audit share one transaction: a transient audit-write failure
+    // rolls the config change back rather than leaving it un-audited.
+    const [row] = await this.prisma.$transaction([
+      this.prisma.appConfig.upsert({
+        where: { key },
+        create: {
+          id: rowId,
+          key,
+          value: dto.value,
+          description: dto.description ?? null,
+          createdByAdminId: actor.adminUserId,
+          updatedByAdminId: actor.adminUserId,
+        },
+        update: {
+          value: dto.value,
+          description: dto.description ?? undefined,
+          deletedAt: null,
+          updatedByAdminId: actor.adminUserId,
+        },
+      }),
+      this.audit.buildRecord({
+        actorAdminUserId: actor.adminUserId,
+        action: 'app_config.manage',
+        targetType: 'AppConfig',
+        targetId: rowId,
+        previousValue: existing ? { key, value: existing.value as Prisma.InputJsonValue } : null,
+        newValue: { key, value: dto.value, __verb: existing ? 'update' : 'create' },
+        result: AuditResult.Success,
+        ipAddress: ctx.ipAddress,
+        userAgent: ctx.userAgent,
+      }),
+    ]);
 
     await this.afterMutation(key);
     return this.toDto(row);
@@ -109,21 +117,23 @@ export class AppConfigService {
     if (!existing) {
       throw new NotFoundException('Config key not found');
     }
-    await this.prisma.appConfig.update({
-      where: { key },
-      data: { deletedAt: new Date(), updatedByAdminId: actor.adminUserId },
-    });
-    await this.audit.record({
-      actorAdminUserId: actor.adminUserId,
-      action: 'app_config.manage',
-      targetType: 'AppConfig',
-      targetId: existing.id,
-      previousValue: { key, value: existing.value as Prisma.InputJsonValue },
-      newValue: { key, __verb: 'delete' },
-      result: AuditResult.Success,
-      ipAddress: ctx.ipAddress,
-      userAgent: ctx.userAgent,
-    });
+    await this.prisma.$transaction([
+      this.prisma.appConfig.update({
+        where: { key },
+        data: { deletedAt: new Date(), updatedByAdminId: actor.adminUserId },
+      }),
+      this.audit.buildRecord({
+        actorAdminUserId: actor.adminUserId,
+        action: 'app_config.manage',
+        targetType: 'AppConfig',
+        targetId: existing.id,
+        previousValue: { key, value: existing.value as Prisma.InputJsonValue },
+        newValue: { key, __verb: 'delete' },
+        result: AuditResult.Success,
+        ipAddress: ctx.ipAddress,
+        userAgent: ctx.userAgent,
+      }),
+    ]);
     await this.afterMutation(key);
   }
 

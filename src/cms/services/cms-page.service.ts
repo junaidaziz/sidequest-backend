@@ -12,7 +12,12 @@ import { CmsRevalidationService } from './cms-revalidation.service';
 
 /** About / Legal / Help / Contact / Safety long-form pages (slug-addressed). */
 @Injectable()
-export class CmsPageService extends CmsResourceService<CmsPage, CmsPageDto> {
+export class CmsPageService extends CmsResourceService<
+  CmsPage,
+  CmsPageDto,
+  CreateCmsPageDto,
+  UpdateCmsPageDto
+> {
   protected readonly delegate = this.prisma.cmsPage as unknown as CmsDelegate<CmsPage>;
   protected readonly targetType = 'CmsPage';
   protected readonly cacheTag = CMS_CACHE_TAGS.pages;
@@ -31,8 +36,7 @@ export class CmsPageService extends CmsResourceService<CmsPage, CmsPageDto> {
     super(prisma, audit, cache, revalidation);
   }
 
-  protected async buildCreateData(dto: unknown): Promise<Record<string, unknown>> {
-    const input = dto as CreateCmsPageDto;
+  protected async buildCreateData(input: CreateCmsPageDto): Promise<Record<string, unknown>> {
     return {
       slug: input.slug,
       title: input.title,
@@ -42,8 +46,7 @@ export class CmsPageService extends CmsResourceService<CmsPage, CmsPageDto> {
     };
   }
 
-  protected async buildUpdateData(dto: unknown): Promise<Record<string, unknown>> {
-    const input = dto as UpdateCmsPageDto;
+  protected async buildUpdateData(input: UpdateCmsPageDto): Promise<Record<string, unknown>> {
     const data: Record<string, unknown> = {};
     if (input.slug !== undefined) data.slug = input.slug;
     if (input.title !== undefined) data.title = input.title;

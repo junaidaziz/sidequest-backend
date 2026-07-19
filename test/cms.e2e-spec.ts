@@ -137,7 +137,7 @@ describe('CMS + app-config (e2e)', () => {
     const published = await request(server())
       .post(`/admin/cms/faqs/${id}/publish`)
       .set('Authorization', `Bearer ${editorToken}`)
-      .expect(201);
+      .expect(200); // publish is a state transition, not a creation
     expect(published.body.status).toBe('Published');
 
     const afterPublish = await request(server()).get('/cms/faqs').expect(200);

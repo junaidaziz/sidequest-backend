@@ -17,7 +17,12 @@ import { CmsRevalidationService } from './cms-revalidation.service';
  * carrying the image itself (createWithImage), not a plain JSON body.
  */
 @Injectable()
-export class CmsScreenshotService extends CmsResourceService<CmsScreenshot, CmsScreenshotDto> {
+export class CmsScreenshotService extends CmsResourceService<
+  CmsScreenshot,
+  CmsScreenshotDto,
+  CreateCmsScreenshotDto,
+  UpdateCmsScreenshotDto
+> {
   protected readonly delegate = this.prisma.cmsScreenshot as unknown as CmsDelegate<CmsScreenshot>;
   protected readonly targetType = 'CmsScreenshot';
   protected readonly cacheTag = CMS_CACHE_TAGS.screenshots;
@@ -41,8 +46,7 @@ export class CmsScreenshotService extends CmsResourceService<CmsScreenshot, CmsS
     throw new BadRequestException('Screenshots must be created with an image via createWithImage');
   }
 
-  protected async buildUpdateData(dto: unknown): Promise<Record<string, unknown>> {
-    const input = dto as UpdateCmsScreenshotDto;
+  protected async buildUpdateData(input: UpdateCmsScreenshotDto): Promise<Record<string, unknown>> {
     const data: Record<string, unknown> = {};
     if (input.title !== undefined) data.title = input.title;
     if (input.caption !== undefined) data.caption = input.caption;

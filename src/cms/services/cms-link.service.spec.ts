@@ -43,8 +43,14 @@ describe('CmsLinkService', () => {
   beforeEach(() => {
     delegate = { findFirst: jest.fn(), create: jest.fn(), update: jest.fn() };
     service = new CmsLinkService(
-      { cmsLink: delegate } as unknown as PrismaService,
-      { record: jest.fn().mockResolvedValue(undefined) } as unknown as AuditLogService,
+      {
+        cmsLink: delegate,
+        $transaction: jest.fn((arr: Promise<unknown>[]) => Promise.all(arr)),
+      } as unknown as PrismaService,
+      {
+        record: jest.fn().mockResolvedValue(undefined),
+        buildRecord: jest.fn(() => Promise.resolve({})),
+      } as unknown as AuditLogService,
       { invalidate: jest.fn().mockResolvedValue(undefined) } as unknown as CmsCacheService,
       { trigger: jest.fn() } as unknown as CmsRevalidationService,
     );

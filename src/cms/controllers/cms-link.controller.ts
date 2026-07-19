@@ -13,7 +13,7 @@ import {
   Post,
   UseGuards,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { CurrentAdmin } from '../../admin-auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../../admin-auth/guards/admin-jwt-auth.guard';
 import { AuthAdmin } from '../../admin-auth/types/admin-jwt-payload.interface';
@@ -34,18 +34,25 @@ export class CmsLinkController {
 
   @Get()
   @RequirePermission('cms.view')
+  @ApiOperation({ summary: 'List all nav/footer/social/legal links (drafts included)' })
+  @ApiResponse({ status: 200, type: [CmsLinkDto] })
   list(): Promise<CmsLinkDto[]> {
     return this.service.list();
   }
 
   @Get(':id')
   @RequirePermission('cms.view')
+  @ApiOperation({ summary: 'Get a link by id' })
+  @ApiResponse({ status: 200, type: CmsLinkDto })
+  @ApiResponse({ status: 404, description: 'Link not found' })
   get(@Param('id', ParseUUIDPipe) id: string): Promise<CmsLinkDto> {
     return this.service.get(id);
   }
 
   @Post()
   @RequirePermission('cms.edit')
+  @ApiOperation({ summary: 'Create a link (starts as Draft)' })
+  @ApiResponse({ status: 201, type: CmsLinkDto })
   create(
     @CurrentAdmin() actor: AuthAdmin,
     @Body() dto: CreateCmsLinkDto,
@@ -57,6 +64,8 @@ export class CmsLinkController {
 
   @Patch('reorder')
   @RequirePermission('cms.edit')
+  @ApiOperation({ summary: 'Reorder links by sortOrder' })
+  @ApiResponse({ status: 200, type: [CmsLinkDto] })
   reorder(
     @CurrentAdmin() actor: AuthAdmin,
     @Body() dto: ReorderDto,
@@ -68,6 +77,8 @@ export class CmsLinkController {
 
   @Patch(':id')
   @RequirePermission('cms.edit')
+  @ApiOperation({ summary: 'Update a link' })
+  @ApiResponse({ status: 200, type: CmsLinkDto })
   update(
     @CurrentAdmin() actor: AuthAdmin,
     @Param('id', ParseUUIDPipe) id: string,
@@ -81,6 +92,8 @@ export class CmsLinkController {
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
   @RequirePermission('cms.edit')
+  @ApiOperation({ summary: 'Soft-delete a link' })
+  @ApiResponse({ status: 204, description: 'Deleted' })
   remove(
     @CurrentAdmin() actor: AuthAdmin,
     @Param('id', ParseUUIDPipe) id: string,
@@ -91,7 +104,10 @@ export class CmsLinkController {
   }
 
   @Post(':id/publish')
+  @HttpCode(HttpStatus.OK)
   @RequirePermission('cms.publish')
+  @ApiOperation({ summary: 'Publish a link' })
+  @ApiResponse({ status: 200, type: CmsLinkDto })
   publish(
     @CurrentAdmin() actor: AuthAdmin,
     @Param('id', ParseUUIDPipe) id: string,
@@ -102,7 +118,10 @@ export class CmsLinkController {
   }
 
   @Post(':id/unpublish')
+  @HttpCode(HttpStatus.OK)
   @RequirePermission('cms.publish')
+  @ApiOperation({ summary: 'Unpublish a link' })
+  @ApiResponse({ status: 200, type: CmsLinkDto })
   unpublish(
     @CurrentAdmin() actor: AuthAdmin,
     @Param('id', ParseUUIDPipe) id: string,

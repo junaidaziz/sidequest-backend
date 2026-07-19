@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { randomUUID } from 'crypto';
 import { AuthAdmin } from '../../admin-auth/types/admin-jwt-payload.interface';
 import { AuditLogService } from '../../audit-log/audit-log.service';
 import { AuditResult } from '../../audit-log/types/audit';
@@ -18,6 +19,9 @@ import { CmsRevalidationService } from './cms-revalidation.service';
  * and its response shape (`toAdminDto`).
  *
  * Design notes:
+ *  - Typed over `CreateDto`/`UpdateDto` so subclasses map an actual DTO type in
+ *    `buildCreateData`/`buildUpdateData` — no `dto: unknown` double-cast at the
+ *    most important data-shaping step.
  *  - `delegate` is a `CmsDelegate<E>` the subclass supplies via a single
  *    `as unknown as` cast of its concrete Prisma delegate — this keeps the base
  *    generic with zero use of `any`.
@@ -25,10 +29,17 @@ import { CmsRevalidationService } from './cms-revalidation.service';
  *    deliberate, separately-permissioned `cms.publish` action, never a side
  *    effect of an edit — this is what lets `cms.edit` and `cms.publish` be
  *    distinct capabilities per the RBAC catalog.
- *  - Every mutation invalidates the public cache and fires a revalidation ping;
- *    the revalidation is best-effort and can never fail the committed write.
+ *  - Every mutation and its audit write share a SINGLE `prisma.$transaction`, so a
+ *    transient audit-write failure rolls the mutation back rather than leaving an
+ *    un-audited content change committed. Cache-invalidation and the revalidation
+ *    ping happen AFTER commit (best-effort, never fail the write).
  */
-export abstract class CmsResourceService<E extends CmsMutableEntity, AdminDto> {
+export abstract class CmsResourceService<
+  E extends CmsMutableEntity,
+  AdminDto,
+  CreateDto = unknown,
+  UpdateDto = unknown,
+> {
   /** The subclass's Prisma delegate, structurally narrowed to CmsDelegate. */
   protected abstract readonly delegate: CmsDelegate<E>;
   /** Prisma model name, used as the audit `targetType` (e.g. "CmsFaq"). */
@@ -49,12 +60,12 @@ export abstract class CmsResourceService<E extends CmsMutableEntity, AdminDto> {
 
   /** Maps a validated create DTO to Prisma create data (audit stamps added by base). */
   protected abstract buildCreateData(
-    dto: unknown,
+    dto: CreateDto,
     actorId: string,
   ): Promise<Record<string, unknown>>;
 
   /** Maps a validated update DTO to a partial Prisma update payload. */
-  protected abstract buildUpdateData(dto: unknown, existing: E): Promise<Record<string, unknown>>;
+  protected abstract buildUpdateData(dto: UpdateDto, existing: E): Promise<Record<string, unknown>>;
 
   /** Maps a persisted entity to its admin response DTO (async: may presign assets). */
   protected abstract toAdminDto(entity: E): Promise<AdminDto>;
@@ -91,25 +102,32 @@ export abstract class CmsResourceService<E extends CmsMutableEntity, AdminDto> {
     return row;
   }
 
-  async create(actor: AuthAdmin, dto: unknown, ctx: CmsRequestContext): Promise<AdminDto> {
+  async create(actor: AuthAdmin, dto: CreateDto, ctx: CmsRequestContext): Promise<AdminDto> {
     const data = await this.buildCreateData(dto, actor.adminUserId);
     return this.persistCreate(actor, data, ctx);
   }
 
   /**
-   * Persists prepared create data (audit stamps applied here). Exposed so image
-   * content types can inject an already-uploaded asset key alongside the DTO
-   * fields before the row is written.
+   * Persists prepared create data + its audit entry in one transaction. The row
+   * id is generated up front so the audit `targetId` is known inside the same
+   * transaction. Exposed so image content types can inject an already-uploaded
+   * asset key alongside the DTO fields before the row is written.
    */
   protected async persistCreate(
     actor: AuthAdmin,
     data: Record<string, unknown>,
     ctx: CmsRequestContext,
   ): Promise<AdminDto> {
+    const id = (data.id as string | undefined) ?? randomUUID();
+    data.id = id;
     data.createdByAdminId = actor.adminUserId;
     data.updatedByAdminId = actor.adminUserId;
-    const row = await this.runWrite(() => this.delegate.create({ data }));
-    await this.recordAudit(actor, 'cms.edit', 'create', row.id, null, this.snapshot(row), ctx);
+    const [row] = await this.runWrite(() =>
+      this.prisma.$transaction([
+        this.delegate.create({ data }),
+        this.auditPromise(actor, 'cms.edit', 'create', id, null, { id }, ctx),
+      ]),
+    );
     await this.afterMutation();
     return this.toAdminDto(row);
   }
@@ -117,7 +135,7 @@ export abstract class CmsResourceService<E extends CmsMutableEntity, AdminDto> {
   async update(
     actor: AuthAdmin,
     id: string,
-    dto: unknown,
+    dto: UpdateDto,
     ctx: CmsRequestContext,
   ): Promise<AdminDto> {
     const existing = await this.findActive(id);
@@ -126,9 +144,8 @@ export abstract class CmsResourceService<E extends CmsMutableEntity, AdminDto> {
   }
 
   /**
-   * Persists a partial update to an already-loaded row (audit + cache + revalidate
-   * handled here). Exposed so image content types can swap an asset key without
-   * going through the DTO path.
+   * Persists a partial update + its audit entry in one transaction. Exposed so
+   * image content types can swap an asset key without going through the DTO path.
    */
   protected async persistPatch(
     actor: AuthAdmin,
@@ -138,17 +155,19 @@ export abstract class CmsResourceService<E extends CmsMutableEntity, AdminDto> {
     verb = 'update',
   ): Promise<AdminDto> {
     data.updatedByAdminId = actor.adminUserId;
-    const row = await this.runWrite(() =>
-      this.delegate.update({ where: { id: existing.id }, data }),
-    );
-    await this.recordAudit(
-      actor,
-      'cms.edit',
-      verb,
-      existing.id,
-      this.snapshot(existing),
-      this.snapshot(row),
-      ctx,
+    const [row] = await this.runWrite(() =>
+      this.prisma.$transaction([
+        this.delegate.update({ where: { id: existing.id }, data }),
+        this.auditPromise(
+          actor,
+          'cms.edit',
+          verb,
+          existing.id,
+          this.snapshot(existing),
+          { id: existing.id },
+          ctx,
+        ),
+      ]),
     );
     await this.afterMutation();
     return this.toAdminDto(row);
@@ -156,18 +175,20 @@ export abstract class CmsResourceService<E extends CmsMutableEntity, AdminDto> {
 
   async remove(actor: AuthAdmin, id: string, ctx: CmsRequestContext): Promise<void> {
     const existing = await this.findActive(id);
-    await this.delegate.update({
-      where: { id },
-      data: { deletedAt: new Date(), updatedByAdminId: actor.adminUserId },
-    });
-    await this.recordAudit(actor, 'cms.edit', 'delete', id, this.snapshot(existing), null, ctx);
+    await this.prisma.$transaction([
+      this.delegate.update({
+        where: { id },
+        data: { deletedAt: new Date(), updatedByAdminId: actor.adminUserId },
+      }),
+      this.auditPromise(actor, 'cms.edit', 'delete', id, this.snapshot(existing), null, ctx),
+    ]);
     await this.afterMutation();
   }
 
   /**
    * Publish / unpublish. Gated by `cms.publish` at the controller (distinct from
-   * the `cms.edit` that gates create/update). Stamps `publishedAt` on models
-   * that carry it.
+   * the `cms.edit` that gates create/update). Stamps `publishedAt` on models that
+   * carry it. Mutation + audit share one transaction.
    */
   async setPublished(
     actor: AuthAdmin,
@@ -176,23 +197,26 @@ export abstract class CmsResourceService<E extends CmsMutableEntity, AdminDto> {
     ctx: CmsRequestContext,
   ): Promise<AdminDto> {
     const existing = await this.findActive(id);
+    const nextStatus = publish ? 'Published' : 'Draft';
     const data: Record<string, unknown> = {
-      status: publish ? 'Published' : 'Draft',
+      status: nextStatus,
       updatedByAdminId: actor.adminUserId,
     };
     if (this.hasPublishedAt) {
       data.publishedAt = publish ? new Date() : null;
     }
-    const row = await this.delegate.update({ where: { id }, data });
-    await this.recordAudit(
-      actor,
-      'cms.publish',
-      publish ? 'publish' : 'unpublish',
-      id,
-      { status: existing.status },
-      { status: row.status },
-      ctx,
-    );
+    const [row] = await this.prisma.$transaction([
+      this.delegate.update({ where: { id }, data }),
+      this.auditPromise(
+        actor,
+        'cms.publish',
+        publish ? 'publish' : 'unpublish',
+        id,
+        { status: existing.status },
+        { status: nextStatus },
+        ctx,
+      ),
+    ]);
     await this.afterMutation();
     return this.toAdminDto(row);
   }
@@ -200,7 +224,8 @@ export abstract class CmsResourceService<E extends CmsMutableEntity, AdminDto> {
   /**
    * Reorders a content type by assigning `sortOrder` from the given id sequence.
    * Rejects a set that doesn't correspond exactly to the live (non-deleted) rows
-   * with those ids, so a stale or tampered list can't null out ordering. Atomic.
+   * with those ids, so a stale or tampered list can't null out ordering. The row
+   * updates and the audit entry are one atomic transaction.
    */
   async reorder(
     actor: AuthAdmin,
@@ -220,14 +245,16 @@ export abstract class CmsResourceService<E extends CmsMutableEntity, AdminDto> {
     if (found.length !== orderedIds.length) {
       throw new BadRequestException('Reorder set does not match the current items');
     }
-    const updates = orderedIds.map((id, index) =>
+    const writes = orderedIds.map((id, index) =>
       this.delegate.update({
         where: { id },
         data: { sortOrder: index, updatedByAdminId: actor.adminUserId },
       }),
     );
-    await this.prisma.$transaction(updates as Prisma.PrismaPromise<E>[]);
-    await this.recordAudit(actor, 'cms.edit', 'reorder', null, null, { order: orderedIds }, ctx);
+    await this.prisma.$transaction([
+      ...writes,
+      this.auditPromise(actor, 'cms.edit', 'reorder', null, null, { order: orderedIds }, ctx),
+    ] as Prisma.PrismaPromise<unknown>[]);
     await this.afterMutation();
     return this.list();
   }
@@ -236,7 +263,7 @@ export abstract class CmsResourceService<E extends CmsMutableEntity, AdminDto> {
    * Wraps a create/update write to map a unique-constraint violation (a duplicate
    * slug/key) to a clean 409 rather than leaking a raw Prisma error.
    */
-  protected async runWrite(write: () => Promise<E>): Promise<E> {
+  protected async runWrite<T>(write: () => Promise<T>): Promise<T> {
     try {
       return await write();
     } catch (error) {
@@ -253,7 +280,8 @@ export abstract class CmsResourceService<E extends CmsMutableEntity, AdminDto> {
     this.revalidation.trigger([`${CMS_REVALIDATE_TAG_PREFIX}${this.cacheTag}`, ...extraTags]);
   }
 
-  private recordAudit(
+  /** Builds the un-awaited audit-insert PrismaPromise for enlistment in a transaction. */
+  private auditPromise(
     actor: AuthAdmin,
     action: string,
     verb: string,
@@ -261,8 +289,8 @@ export abstract class CmsResourceService<E extends CmsMutableEntity, AdminDto> {
     previousValue: Record<string, unknown> | null,
     nextValue: Record<string, unknown> | null,
     ctx: CmsRequestContext,
-  ): Promise<void> {
-    return this.audit.record({
+  ): Prisma.PrismaPromise<unknown> {
+    return this.audit.buildRecord({
       actorAdminUserId: actor.adminUserId,
       action,
       targetType: this.targetType,

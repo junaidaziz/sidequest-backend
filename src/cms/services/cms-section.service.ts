@@ -16,7 +16,12 @@ import { CmsRevalidationService } from './cms-revalidation.service';
  * reaches here it is a known-safe structured shape — never freeform JSON.
  */
 @Injectable()
-export class CmsSectionService extends CmsResourceService<CmsSection, CmsSectionDto> {
+export class CmsSectionService extends CmsResourceService<
+  CmsSection,
+  CmsSectionDto,
+  CreateCmsSectionDto,
+  UpdateCmsSectionDto
+> {
   protected readonly delegate = this.prisma.cmsSection as unknown as CmsDelegate<CmsSection>;
   protected readonly targetType = 'CmsSection';
   protected readonly cacheTag = CMS_CACHE_TAGS.sections;
@@ -32,8 +37,7 @@ export class CmsSectionService extends CmsResourceService<CmsSection, CmsSection
     super(prisma, audit, cache, revalidation);
   }
 
-  protected async buildCreateData(dto: unknown): Promise<Record<string, unknown>> {
-    const input = dto as CreateCmsSectionDto;
+  protected async buildCreateData(input: CreateCmsSectionDto): Promise<Record<string, unknown>> {
     return {
       key: input.key,
       type: input.type,
@@ -43,8 +47,7 @@ export class CmsSectionService extends CmsResourceService<CmsSection, CmsSection
     };
   }
 
-  protected async buildUpdateData(dto: unknown): Promise<Record<string, unknown>> {
-    const input = dto as UpdateCmsSectionDto;
+  protected async buildUpdateData(input: UpdateCmsSectionDto): Promise<Record<string, unknown>> {
     const data: Record<string, unknown> = {};
     if (input.key !== undefined) data.key = input.key;
     if (input.type !== undefined) data.type = input.type;

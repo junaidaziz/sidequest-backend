@@ -14,7 +14,12 @@ import { CmsRevalidationService } from './cms-revalidation.service';
 
 /** Customer testimonials, with an optional (sanitized) avatar image. */
 @Injectable()
-export class CmsTestimonialService extends CmsResourceService<CmsTestimonial, CmsTestimonialDto> {
+export class CmsTestimonialService extends CmsResourceService<
+  CmsTestimonial,
+  CmsTestimonialDto,
+  CreateCmsTestimonialDto,
+  UpdateCmsTestimonialDto
+> {
   protected readonly delegate = this.prisma
     .cmsTestimonial as unknown as CmsDelegate<CmsTestimonial>;
   protected readonly targetType = 'CmsTestimonial';
@@ -32,8 +37,9 @@ export class CmsTestimonialService extends CmsResourceService<CmsTestimonial, Cm
     super(prisma, audit, cache, revalidation);
   }
 
-  protected async buildCreateData(dto: unknown): Promise<Record<string, unknown>> {
-    const input = dto as CreateCmsTestimonialDto;
+  protected async buildCreateData(
+    input: CreateCmsTestimonialDto,
+  ): Promise<Record<string, unknown>> {
     return {
       authorName: input.authorName,
       authorTitle: input.authorTitle ?? null,
@@ -43,8 +49,9 @@ export class CmsTestimonialService extends CmsResourceService<CmsTestimonial, Cm
     };
   }
 
-  protected async buildUpdateData(dto: unknown): Promise<Record<string, unknown>> {
-    const input = dto as UpdateCmsTestimonialDto;
+  protected async buildUpdateData(
+    input: UpdateCmsTestimonialDto,
+  ): Promise<Record<string, unknown>> {
     const data: Record<string, unknown> = {};
     if (input.authorName !== undefined) data.authorName = input.authorName;
     if (input.authorTitle !== undefined) data.authorTitle = input.authorTitle;

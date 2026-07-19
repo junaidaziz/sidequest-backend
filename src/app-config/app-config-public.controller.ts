@@ -1,4 +1,5 @@
 import { Controller, Get } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { AppConfigService } from './app-config.service';
 import { PublicAppConfigDto } from './dto/app-config.dto';
@@ -9,6 +10,8 @@ import { PublicAppConfigDto } from './dto/app-config.dto';
  * links) — never an internal feature flag. Cached (best-effort) via Redis.
  */
 @ApiTags('config-public')
+// Generous per-IP cap for public traffic, overriding the mobile-tuned global.
+@Throttle({ default: { limit: 120, ttl: 60_000 } })
 @Controller('config')
 export class AppConfigPublicController {
   constructor(private readonly service: AppConfigService) {}

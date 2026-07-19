@@ -12,7 +12,12 @@ import { CmsRevalidationService } from './cms-revalidation.service';
 
 /** Frequently-asked-questions content type. */
 @Injectable()
-export class CmsFaqService extends CmsResourceService<CmsFaq, CmsFaqDto> {
+export class CmsFaqService extends CmsResourceService<
+  CmsFaq,
+  CmsFaqDto,
+  CreateCmsFaqDto,
+  UpdateCmsFaqDto
+> {
   protected readonly delegate = this.prisma.cmsFaq as unknown as CmsDelegate<CmsFaq>;
   protected readonly targetType = 'CmsFaq';
   protected readonly cacheTag = CMS_CACHE_TAGS.faqs;
@@ -28,8 +33,7 @@ export class CmsFaqService extends CmsResourceService<CmsFaq, CmsFaqDto> {
     super(prisma, audit, cache, revalidation);
   }
 
-  protected async buildCreateData(dto: unknown): Promise<Record<string, unknown>> {
-    const input = dto as CreateCmsFaqDto;
+  protected async buildCreateData(input: CreateCmsFaqDto): Promise<Record<string, unknown>> {
     return {
       question: input.question,
       answer: input.answer,
@@ -38,8 +42,7 @@ export class CmsFaqService extends CmsResourceService<CmsFaq, CmsFaqDto> {
     };
   }
 
-  protected async buildUpdateData(dto: unknown): Promise<Record<string, unknown>> {
-    const input = dto as UpdateCmsFaqDto;
+  protected async buildUpdateData(input: UpdateCmsFaqDto): Promise<Record<string, unknown>> {
     const data: Record<string, unknown> = {};
     if (input.question !== undefined) data.question = input.question;
     if (input.answer !== undefined) data.answer = input.answer;

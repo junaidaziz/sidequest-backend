@@ -12,7 +12,12 @@ import { CmsRevalidationService } from './cms-revalidation.service';
 
 /** Managed nav / footer / social / legal links. No `publishedAt` column. */
 @Injectable()
-export class CmsLinkService extends CmsResourceService<CmsLink, CmsLinkDto> {
+export class CmsLinkService extends CmsResourceService<
+  CmsLink,
+  CmsLinkDto,
+  CreateCmsLinkDto,
+  UpdateCmsLinkDto
+> {
   protected readonly delegate = this.prisma.cmsLink as unknown as CmsDelegate<CmsLink>;
   protected readonly targetType = 'CmsLink';
   protected readonly cacheTag = CMS_CACHE_TAGS.links;
@@ -28,8 +33,7 @@ export class CmsLinkService extends CmsResourceService<CmsLink, CmsLinkDto> {
     super(prisma, audit, cache, revalidation);
   }
 
-  protected async buildCreateData(dto: unknown): Promise<Record<string, unknown>> {
-    const input = dto as CreateCmsLinkDto;
+  protected async buildCreateData(input: CreateCmsLinkDto): Promise<Record<string, unknown>> {
     return {
       placement: input.placement,
       label: input.label,
@@ -39,8 +43,7 @@ export class CmsLinkService extends CmsResourceService<CmsLink, CmsLinkDto> {
     };
   }
 
-  protected async buildUpdateData(dto: unknown): Promise<Record<string, unknown>> {
-    const input = dto as UpdateCmsLinkDto;
+  protected async buildUpdateData(input: UpdateCmsLinkDto): Promise<Record<string, unknown>> {
     const data: Record<string, unknown> = {};
     if (input.placement !== undefined) data.placement = input.placement;
     if (input.label !== undefined) data.label = input.label;

@@ -13,7 +13,7 @@ import {
   Post,
   UseGuards,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { CurrentAdmin } from '../../admin-auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../../admin-auth/guards/admin-jwt-auth.guard';
 import { AuthAdmin } from '../../admin-auth/types/admin-jwt-payload.interface';
@@ -41,6 +41,9 @@ export class CmsSectionController {
 
   @Get(':id')
   @RequirePermission('cms.view')
+  @ApiOperation({ summary: 'Get a section by id' })
+  @ApiResponse({ status: 200, type: CmsSectionDto })
+  @ApiResponse({ status: 404, description: 'Section not found' })
   get(@Param('id', ParseUUIDPipe) id: string): Promise<CmsSectionDto> {
     return this.service.get(id);
   }
@@ -71,6 +74,8 @@ export class CmsSectionController {
 
   @Patch(':id')
   @RequirePermission('cms.edit')
+  @ApiOperation({ summary: 'Update a section (data re-validated per type when supplied)' })
+  @ApiResponse({ status: 200, type: CmsSectionDto })
   update(
     @CurrentAdmin() actor: AuthAdmin,
     @Param('id', ParseUUIDPipe) id: string,
@@ -84,6 +89,8 @@ export class CmsSectionController {
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
   @RequirePermission('cms.edit')
+  @ApiOperation({ summary: 'Soft-delete a section' })
+  @ApiResponse({ status: 204, description: 'Deleted' })
   remove(
     @CurrentAdmin() actor: AuthAdmin,
     @Param('id', ParseUUIDPipe) id: string,
@@ -94,7 +101,10 @@ export class CmsSectionController {
   }
 
   @Post(':id/publish')
+  @HttpCode(HttpStatus.OK)
   @RequirePermission('cms.publish')
+  @ApiOperation({ summary: 'Publish a section' })
+  @ApiResponse({ status: 200, type: CmsSectionDto })
   publish(
     @CurrentAdmin() actor: AuthAdmin,
     @Param('id', ParseUUIDPipe) id: string,
@@ -105,7 +115,10 @@ export class CmsSectionController {
   }
 
   @Post(':id/unpublish')
+  @HttpCode(HttpStatus.OK)
   @RequirePermission('cms.publish')
+  @ApiOperation({ summary: 'Unpublish a section' })
+  @ApiResponse({ status: 200, type: CmsSectionDto })
   unpublish(
     @CurrentAdmin() actor: AuthAdmin,
     @Param('id', ParseUUIDPipe) id: string,
