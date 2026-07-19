@@ -21,7 +21,7 @@ import { AdminSuccessResponseDto } from '../admin-auth/dto/generic-response.dto'
 import { AdminManagementService } from './admin-management.service';
 import { RequirePermission } from './decorators/require-permission.decorator';
 import { InviteAdminDto } from './dto/invite-admin.dto';
-import { AdminUserDto } from './dto/rbac-response.dto';
+import { AdminMeDto, AdminUserDto } from './dto/rbac-response.dto';
 import { UpdateAdminDto } from './dto/update-admin.dto';
 import { PermissionGuard } from './guards/permission.guard';
 
@@ -60,6 +60,19 @@ export class AdminManagementController {
     @Headers('user-agent') userAgent?: string,
   ): Promise<AdminUserDto> {
     return this.service.invite(actor, dto, this.ctx(ip, userAgent));
+  }
+
+  // NOTE: registered before ':id' — Nest/Express match routes in declaration
+  // order for a shared base path, so 'me' must come first or ':id' would
+  // swallow it as a literal id value of "me".
+  @Get('me')
+  @ApiOperation({
+    summary: "Get the caller's own profile, role, and effective permissions",
+  })
+  @ApiResponse({ status: 200, type: AdminMeDto })
+  @ApiResponse({ status: 401, description: 'Missing or invalid admin token' })
+  getSelf(@CurrentAdmin() actor: AuthAdmin): Promise<AdminMeDto> {
+    return this.service.getSelf(actor);
   }
 
   @Get(':id')

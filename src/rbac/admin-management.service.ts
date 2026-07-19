@@ -5,6 +5,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AdminUser, Prisma, Role } from '@prisma/client';
@@ -15,7 +16,7 @@ import { AuditLogService } from '../audit-log/audit-log.service';
 import { AuditResult } from '../audit-log/types/audit';
 import { EmailService } from '../email/email.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { AdminUserDto } from './dto/rbac-response.dto';
+import { AdminMeDto, AdminUserDto } from './dto/rbac-response.dto';
 import { InviteAdminDto } from './dto/invite-admin.dto';
 import { UpdateAdminDto } from './dto/update-admin.dto';
 import { PermissionResolverService } from './permission-resolver.service';
@@ -61,6 +62,29 @@ export class AdminManagementService {
       throw new NotFoundException('Admin not found');
     }
     return this.toDto(admin, admin.role);
+  }
+
+  /**
+   * The caller's own profile + effective permission set. Self-service (acts
+   * only on the caller's own account), so this is intentionally reachable
+   * even without `admins.view` — the web admin portal's BFF calls this once
+   * on session load to render the shell's role-gated nav, and every admin
+   * (regardless of role) must be able to learn their own permissions.
+   */
+  async getSelf(auth: AuthAdmin): Promise<AdminMeDto> {
+    const admin = await this.prisma.adminUser.findFirst({
+      where: { id: auth.adminUserId, deletedAt: null },
+      include: { role: true },
+    });
+    if (!admin) {
+      throw new UnauthorizedException('Admin account not found');
+    }
+    const permissions = await this.resolver.getEffectivePermissions(admin.id);
+    return {
+      ...this.toDto(admin, admin.role),
+      permissions: [...permissions].sort(),
+      mfaEnrollmentRequired: admin.role.mfaRequired && admin.mfaEnabledAt === null,
+    };
   }
 
   /** Creates a pending admin, generates an invite token, and emails an accept link. */

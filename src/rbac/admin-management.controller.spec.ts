@@ -24,6 +24,7 @@ describe('AdminManagementController', () => {
       disable: jest.fn().mockResolvedValue({ id: 'a' }),
       resetMfa: jest.fn().mockResolvedValue(undefined),
       revokeSessions: jest.fn().mockResolvedValue(undefined),
+      getSelf: jest.fn().mockResolvedValue({ id: 'actor-1', permissions: [] }),
     };
     controller = new AdminManagementController(service as unknown as AdminManagementService);
   });
@@ -50,5 +51,10 @@ describe('AdminManagementController', () => {
   it('reset-mfa / revoke-sessions return success', async () => {
     expect(await controller.resetMfa(ACTOR, 'a', '1.2.3.4')).toEqual({ success: true });
     expect(await controller.revokeSessions(ACTOR, 'a', '1.2.3.4')).toEqual({ success: true });
+  });
+
+  it('getSelf delegates to the service with the calling actor', async () => {
+    await controller.getSelf(ACTOR);
+    expect(service.getSelf).toHaveBeenCalledWith(ACTOR);
   });
 });

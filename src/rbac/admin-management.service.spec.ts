@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
@@ -31,7 +32,7 @@ function adminRow(overrides: Record<string, unknown> = {}) {
     displayName: 'Admin',
     status: 'Active',
     roleId: 'role-1',
-    role: { id: 'role-1', key: 'support_agent' },
+    role: { id: 'role-1', key: 'support_agent', mfaRequired: false },
     mfaEnabledAt: null,
     mustChangePassword: false,
     lastLoginAt: null,
@@ -52,7 +53,11 @@ describe('AdminManagementService', () => {
   let email: { sendAdminInvite: jest.Mock };
   let adminAuth: { issueInviteToken: jest.Mock };
   let mfa: { reset: jest.Mock };
-  let resolver: { hasAll: jest.Mock; bumpRoleVersion: jest.Mock };
+  let resolver: {
+    hasAll: jest.Mock;
+    bumpRoleVersion: jest.Mock;
+    getEffectivePermissions: jest.Mock;
+  };
   let service: AdminManagementService;
 
   beforeEach(() => {
@@ -71,7 +76,11 @@ describe('AdminManagementService', () => {
     email = { sendAdminInvite: jest.fn() };
     adminAuth = { issueInviteToken: jest.fn().mockResolvedValue('raw-token') };
     mfa = { reset: jest.fn() };
-    resolver = { hasAll: jest.fn(), bumpRoleVersion: jest.fn() };
+    resolver = {
+      hasAll: jest.fn(),
+      bumpRoleVersion: jest.fn(),
+      getEffectivePermissions: jest.fn(),
+    };
     service = new AdminManagementService(
       prisma as unknown as PrismaService,
       audit as unknown as AuditLogService,
@@ -224,6 +233,32 @@ describe('AdminManagementService', () => {
       await service.revokeSessions(ACTOR, 'admin-2', CTX);
       expect(prisma.adminSession.updateMany).toHaveBeenCalled();
       expect(audit.record).toHaveBeenCalled();
+    });
+  });
+
+  describe('getSelf', () => {
+    it('401s when the calling admin no longer exists (deleted mid-session)', async () => {
+      prisma.adminUser.findFirst.mockResolvedValue(null);
+      await expect(service.getSelf(ACTOR)).rejects.toThrow(UnauthorizedException);
+    });
+
+    it('returns the profile with sorted effective permissions, not gated by admins.view', async () => {
+      prisma.adminUser.findFirst.mockResolvedValue(adminRow());
+      resolver.getEffectivePermissions.mockResolvedValue(new Set(['users.view', 'analytics.view']));
+      const me = await service.getSelf(ACTOR);
+      expect(resolver.getEffectivePermissions).toHaveBeenCalledWith('admin-2');
+      expect(me.permissions).toEqual(['analytics.view', 'users.view']);
+      expect(me.mfaEnrollmentRequired).toBe(false);
+      expect(me.roleKey).toBe('support_agent');
+    });
+
+    it('flags mfaEnrollmentRequired when the role mandates MFA but none is enrolled yet', async () => {
+      prisma.adminUser.findFirst.mockResolvedValue(
+        adminRow({ role: { id: 'role-owner', key: 'owner', mfaRequired: true } }),
+      );
+      resolver.getEffectivePermissions.mockResolvedValue(new Set());
+      const me = await service.getSelf(ACTOR);
+      expect(me.mfaEnrollmentRequired).toBe(true);
     });
   });
 });
