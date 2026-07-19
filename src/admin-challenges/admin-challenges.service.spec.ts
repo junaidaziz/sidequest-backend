@@ -348,8 +348,14 @@ describe('AdminChallengesService', () => {
         }),
       );
       expect(missionPool.invalidate).toHaveBeenCalled();
+      // Audit records the mission's REAL prior status/isActive (a real enum value),
+      // not the previously-hardcoded 'unpublished' string.
       expect(audit.record).toHaveBeenCalledWith(
-        expect.objectContaining({ action: 'challenges.publish', reason: 'go live' }),
+        expect.objectContaining({
+          action: 'challenges.publish',
+          reason: 'go live',
+          previousValue: { status: MissionStatus.Draft, isActive: false },
+        }),
       );
     });
 
@@ -416,6 +422,30 @@ describe('AdminChallengesService', () => {
       const res = await service.archive('mission-1', CTX);
       expect(res.status).toBe(MissionStatus.Archived);
       expect(missionPool.invalidate).toHaveBeenCalled();
+      // Audit records the mission's REAL prior state, not a hardcoded value.
+      expect(audit.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'challenges.archive',
+          previousValue: { status: MissionStatus.Published, isActive: true },
+        }),
+      );
+    });
+
+    it('archiving an inactive Draft does not bust the still-correct cache', async () => {
+      tx.$queryRaw.mockResolvedValue([
+        { id: 'mission-1', status: MissionStatus.Draft, isActive: false, deletedAt: null },
+      ]);
+      tx.mission.update.mockResolvedValue(
+        buildMission({ status: MissionStatus.Archived, isActive: false }),
+      );
+
+      await service.archive('mission-1', CTX);
+      expect(missionPool.invalidate).not.toHaveBeenCalled();
+      expect(audit.record).toHaveBeenCalledWith(
+        expect.objectContaining({
+          previousValue: { status: MissionStatus.Draft, isActive: false },
+        }),
+      );
     });
 
     it('conflicts when already archived', async () => {
@@ -495,6 +525,16 @@ describe('AdminChallengesService', () => {
 
       await service.duplicate('src', CTX);
       expect(prisma.mission.create.mock.calls[0][0].data.title).toBe('Original (Copy 2)');
+    });
+
+    it('maps a concurrent title race on the clone insert to 409', async () => {
+      prisma.mission.findFirst.mockResolvedValue(buildMission({ title: 'Original' }));
+      prisma.mission.findUnique.mockResolvedValue(null); // title looked free...
+      prisma.mission.create.mockRejectedValue(
+        // ...but a concurrent duplicate won the insert first.
+        new Prisma.PrismaClientKnownRequestError('dup', { code: 'P2002', clientVersion: '5' }),
+      );
+      await expect(service.duplicate('src', CTX)).rejects.toBeInstanceOf(ConflictException);
     });
 
     it('deep-clones milestones JSON', async () => {
