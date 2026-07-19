@@ -23,6 +23,10 @@ function buildUser(overrides: Partial<User> = {}): User {
     createdAt: new Date(),
     updatedAt: new Date(),
     deletedAt: null,
+    suspendedAt: null,
+    suspensionReason: null,
+    suspendedByAdminId: null,
+    restrictedFeatures: [],
     ...overrides,
   };
 }
@@ -64,6 +68,12 @@ describe('JwtStrategy', () => {
 
   it('rejects tokens for soft-deleted users', async () => {
     prisma.user.findUnique.mockResolvedValue(buildUser({ deletedAt: new Date() }));
+
+    await expect(strategy.validate(accessPayload)).rejects.toBeInstanceOf(UnauthorizedException);
+  });
+
+  it('rejects tokens for suspended users (admin suspension enforced per-request)', async () => {
+    prisma.user.findUnique.mockResolvedValue(buildUser({ suspendedAt: new Date() }));
 
     await expect(strategy.validate(accessPayload)).rejects.toBeInstanceOf(UnauthorizedException);
   });
