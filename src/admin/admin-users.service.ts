@@ -334,10 +334,13 @@ export class AdminUsersService {
     }
 
     if (query.hasChallengeParticipation === true) {
-      where.OR = [
-        ...(where.OR ? (where.OR as Prisma.UserWhereInput[]) : []),
-        { createdTasks: { some: {} } },
-        { assignedTasks: { some: {} } },
+      // Must AND with (not be folded into) the search OR: appending these to
+      // `where.OR` would make "matches the search term" OR "participates in any
+      // challenge" — returning every participating user regardless of the search.
+      // A top-level AND keeps the two filters independent and both mandatory.
+      where.AND = [
+        ...(where.AND ? (where.AND as Prisma.UserWhereInput[]) : []),
+        { OR: [{ createdTasks: { some: {} } }, { assignedTasks: { some: {} } }] },
       ];
     } else if (query.hasChallengeParticipation === false) {
       where.createdTasks = { none: {} };
