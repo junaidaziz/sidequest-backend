@@ -35,6 +35,15 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     if (!user || user.deletedAt) {
       throw new UnauthorizedException('User no longer exists');
     }
+    // Admin suspension (Phase 8) is enforced here, on every request, exactly like
+    // the soft-delete check above: a non-null `suspendedAt` rejects the caller's
+    // existing (still-unexpired) access token on its very next use, so an admin
+    // suspend takes effect immediately with no token-revocation bookkeeping. The
+    // suspend action also nulls `refreshTokenHash`, so the refresh path can't mint
+    // a fresh access token to route around this.
+    if (user.suspendedAt) {
+      throw new UnauthorizedException('Account suspended');
+    }
 
     return { userId: user.id, email: user.email, isGuest: user.isGuest };
   }
