@@ -1,5 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { MissionCategory, MissionDifficulty, MissionStatus, Prisma } from '@prisma/client';
+import { MissionCategory, MissionDifficulty, MissionStatus } from '@prisma/client';
+import { MissionMilestone } from '../types/mission-milestone';
+import { MissionMilestoneDto } from './mission-milestone.dto';
 
 /** One row in the paginated `GET /admin/missions` result. */
 export class AdminMissionListItemDto {
@@ -123,8 +125,12 @@ export class AdminMissionDetailDto {
   @ApiPropertyOptional({ nullable: true })
   participantLimit!: number | null;
 
-  @ApiPropertyOptional({ nullable: true, description: 'Ordered milestone definitions (JSON)' })
-  milestones!: Prisma.JsonValue | null;
+  @ApiPropertyOptional({
+    nullable: true,
+    type: [MissionMilestoneDto],
+    description: 'Ordered milestone definitions',
+  })
+  milestones!: MissionMilestone[] | null;
 
   @ApiPropertyOptional({ nullable: true })
   safetyNotice!: string | null;
