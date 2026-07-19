@@ -788,6 +788,43 @@ describe('AuthService', () => {
         UnauthorizedException,
       );
     });
+
+    it('does not authenticate a suspended googleId match, falling through to create a new account', async () => {
+      mockGooglePayload();
+      prisma.user.findUnique
+        .mockResolvedValueOnce(
+          buildUser({ id: 'gu-suspended', googleId: 'google-sub', suspendedAt: new Date() }),
+        ) // googleId lookup hits but suspended
+        .mockResolvedValueOnce(null); // email lookup misses
+      prisma.user.create.mockResolvedValue(
+        buildUser({ id: 'new-1', googleId: 'google-sub', isGuest: false }),
+      );
+
+      const result = await service.googleAuth({ idToken: 'good.token' });
+
+      // No token issued for the suspended row and no write that would resurrect
+      // its nulled refreshTokenHash — it falls through to a fresh account.
+      expect(prisma.user.create).toHaveBeenCalled();
+      expect(result.user.id).toBe('new-1');
+    });
+
+    it('does not auto-link a suspended email match, leaving its nulled refresh hash intact', async () => {
+      mockGooglePayload();
+      prisma.user.findUnique
+        .mockResolvedValueOnce(null) // googleId lookup misses
+        .mockResolvedValueOnce(buildUser({ id: 'pw-suspended', suspendedAt: new Date() })); // email hits but suspended
+      prisma.user.create.mockResolvedValue(
+        buildUser({ id: 'new-1', googleId: 'google-sub', isGuest: false }),
+      );
+
+      const result = await service.googleAuth({ idToken: 'good.token' });
+
+      // Critically: the suspended row is NOT updated (an auto-link would write a
+      // fresh refreshTokenHash, undoing suspend()'s revocation).
+      expect(prisma.user.update).not.toHaveBeenCalled();
+      expect(prisma.user.create).toHaveBeenCalled();
+      expect(result.user.id).toBe('new-1');
+    });
   });
 
   describe('login', () => {
@@ -844,6 +881,15 @@ describe('AuthService', () => {
       await expect(
         service.login({ email: 'ada@example.com', password: 'password123' }),
       ).rejects.toBeInstanceOf(UnauthorizedException);
+    });
+
+    it('throws UnauthorizedException when the account is suspended (no fresh tokens minted)', async () => {
+      prisma.user.findUnique.mockResolvedValue(buildUser({ suspendedAt: new Date() }));
+
+      await expect(
+        service.login({ email: 'ada@example.com', password: 'password123' }),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+      expect(prisma.user.update).not.toHaveBeenCalled();
     });
 
     it('throws UnauthorizedException on wrong password', async () => {
@@ -942,6 +988,25 @@ describe('AuthService', () => {
       await expect(service.refresh({ refreshToken: 'stale.refresh.token' })).rejects.toBeInstanceOf(
         UnauthorizedException,
       );
+    });
+
+    it('throws when the account is suspended, even with a still-valid refresh hash', async () => {
+      jwtService.verifyAsync.mockResolvedValue({
+        sub: 'user-1',
+        isGuest: false,
+        type: TokenType.Refresh,
+      });
+      // A token minted before suspend() nulled the hash: hash present + matches,
+      // but suspendedAt must still block the rotation.
+      prisma.user.findUnique.mockResolvedValue(
+        buildUser({ refreshTokenHash: 'stored-hash', suspendedAt: new Date() }),
+      );
+      bcryptCompare.mockResolvedValue(true);
+
+      await expect(service.refresh({ refreshToken: 'valid.refresh.token' })).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+      expect(prisma.user.update).not.toHaveBeenCalled();
     });
   });
 
