@@ -161,10 +161,30 @@ describe('AdminUsersService', () => {
       expect(where.lastCompletionDate.lte).toBeInstanceOf(Date);
     });
 
-    it('filters to users with challenge participation', async () => {
+    it('filters to users with challenge participation via a top-level AND', async () => {
       await service.list({ hasChallengeParticipation: true } as ListUsersQueryDto);
       const where = prisma.user.findMany.mock.calls[0][0].where;
-      expect(where.OR).toEqual([{ createdTasks: { some: {} } }, { assignedTasks: { some: {} } }]);
+      expect(where.AND).toEqual([
+        { OR: [{ createdTasks: { some: {} } }, { assignedTasks: { some: {} } }] },
+      ]);
+    });
+
+    it('ANDs participation with search instead of merging into the search OR', async () => {
+      await service.list({
+        search: 'ada',
+        hasChallengeParticipation: true,
+      } as ListUsersQueryDto);
+      const where = prisma.user.findMany.mock.calls[0][0].where;
+      // The search OR stays intact and independent...
+      expect(where.OR).toEqual([
+        { email: { contains: 'ada', mode: 'insensitive' } },
+        { displayName: { contains: 'ada', mode: 'insensitive' } },
+      ]);
+      // ...and the participation constraint is a separate, mandatory AND clause,
+      // so a search+participation query can't return non-matching participants.
+      expect(where.AND).toEqual([
+        { OR: [{ createdTasks: { some: {} } }, { assignedTasks: { some: {} } }] },
+      ]);
     });
 
     it('filters to users without challenge participation', async () => {
