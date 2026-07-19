@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsInt, IsOptional, IsString, MaxLength, Min, MinLength } from 'class-validator';
+import { MissionMilestone } from '../types/mission-milestone';
 
 /**
  * One entry in a mission's optional ordered milestone list (`Mission.milestones`,
@@ -8,7 +9,7 @@ import { IsInt, IsOptional, IsString, MaxLength, Min, MinLength } from 'class-va
  * client hits at render time. The whole array is optional — most missions are
  * single-step and carry no milestones at all.
  */
-export class MissionMilestoneDto {
+export class MissionMilestoneDto implements MissionMilestone {
   @ApiProperty({ description: 'Short milestone/checkpoint label', minLength: 1, maxLength: 200 })
   @IsString()
   @MinLength(1)
