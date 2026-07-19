@@ -119,7 +119,7 @@ describe('AdminUsersController', () => {
     );
   });
 
-  it('deleteUser passes the reason and returns a success acknowledgement', async () => {
+  it('deleteUser passes the reason and resolves void (204, no body)', async () => {
     service.deleteUser.mockResolvedValue(undefined);
     const result = await controller.deleteUser(
       ACTOR,
@@ -129,7 +129,7 @@ describe('AdminUsersController', () => {
       UA,
     );
     expect(service.deleteUser).toHaveBeenCalledWith('user-1', 'gdpr', expect.any(Object));
-    expect(result).toEqual({ success: true });
+    expect(result).toBeUndefined();
   });
 
   it('defaults a missing user-agent header to null in the context', async () => {
