@@ -133,7 +133,10 @@ export class AuthService {
         const guest = await this.prisma.user.findUnique({
           where: { id: guestUserId },
         });
-        if (guest && guest.isGuest && !guest.deletedAt) {
+        // suspendedAt excluded so a suspended guest can't upgrade into a fresh
+        // token pair (which would also resurrect the nulled refreshTokenHash),
+        // matching every other token-issuing path.
+        if (guest && guest.isGuest && !guest.deletedAt && !guest.suspendedAt) {
           const { accessToken, refreshToken, refreshTokenHash } = await this.buildTokenSet(
             guest.id,
             false,
@@ -208,8 +211,13 @@ export class AuthService {
     // A soft-deleted row (deletedAt set) must not authenticate, matching
     // login()/refresh()/getProfile() — treat it as if the googleId weren't
     // taken, falling through to auto-link/guest-upgrade/new-account below.
+    // A suspended account (Phase 8) is treated like a soft-deleted one on every
+    // Google path: no token pair is issued and the row is left untouched, so the
+    // `refreshTokenHash: null` that suspend() set to kill the refresh path is
+    // never resurrected. It falls through to auto-link/guest-upgrade/new-account,
+    // all of which apply the same suspendedAt exclusion below.
     const byGoogleId = await this.prisma.user.findUnique({ where: { googleId: sub } });
-    if (byGoogleId && !byGoogleId.deletedAt) {
+    if (byGoogleId && !byGoogleId.deletedAt && !byGoogleId.suspendedAt) {
       const tokens = await this.persistTokens(byGoogleId.id, byGoogleId.isGuest);
       return { ...tokens, user: await this.toProfile(byGoogleId) };
     }
@@ -223,8 +231,11 @@ export class AuthService {
       // Fold the fresh refreshTokenHash into the same write as steps 3/4,
       // rather than a separate persistTokens() call, so the link and the
       // token-hash rotation can't land as two independently-failable writes.
+      // Same suspendedAt exclusion as the returning-Google path: a suspended
+      // account must NOT auto-link here — that path writes a fresh
+      // `refreshTokenHash`, which would resurrect the one suspend() nulled.
       const byEmail = await this.prisma.user.findUnique({ where: { email } });
-      if (byEmail && !byEmail.deletedAt) {
+      if (byEmail && !byEmail.deletedAt && !byEmail.suspendedAt) {
         const { accessToken, refreshToken, refreshTokenHash } = await this.buildTokenSet(
           byEmail.id,
           false,
@@ -247,7 +258,9 @@ export class AuthService {
       const guestUserId = this.resolveGuestUserId(bearerToken);
       if (guestUserId) {
         const guest = await this.prisma.user.findUnique({ where: { id: guestUserId } });
-        if (guest && guest.isGuest && !guest.deletedAt) {
+        // suspendedAt excluded here too for consistency (suspending a guest is
+        // rare, but the guard should be uniform across every token-issuing path).
+        if (guest && guest.isGuest && !guest.deletedAt && !guest.suspendedAt) {
           const { accessToken, refreshToken, refreshTokenHash } = await this.buildTokenSet(
             guest.id,
             false,
