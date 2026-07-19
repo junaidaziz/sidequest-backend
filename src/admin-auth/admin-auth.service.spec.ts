@@ -255,8 +255,24 @@ describe('AdminAuthService', () => {
 
     it('flags the current session in the sessions list', async () => {
       prisma.adminSession.findMany.mockResolvedValue([
-        { id: 'session-1', userAgent: null, ipAddress: null, lastUsedAt: null, expiresAt: new Date(), revokedAt: null, createdAt: new Date() },
-        { id: 'session-2', userAgent: null, ipAddress: null, lastUsedAt: null, expiresAt: new Date(), revokedAt: null, createdAt: new Date() },
+        {
+          id: 'session-1',
+          userAgent: null,
+          ipAddress: null,
+          lastUsedAt: null,
+          expiresAt: new Date(),
+          revokedAt: null,
+          createdAt: new Date(),
+        },
+        {
+          id: 'session-2',
+          userAgent: null,
+          ipAddress: null,
+          lastUsedAt: null,
+          expiresAt: new Date(),
+          revokedAt: null,
+          createdAt: new Date(),
+        },
       ]);
       const list = await service.listSessions(auth);
       expect(list.find((s) => s.id === 'session-1')?.current).toBe(true);

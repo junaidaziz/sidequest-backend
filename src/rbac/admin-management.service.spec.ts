@@ -142,18 +142,18 @@ describe('AdminManagementService', () => {
     it('403s on a role change without roles.assign', async () => {
       prisma.adminUser.findFirst.mockResolvedValue(adminRow());
       resolver.hasAll.mockResolvedValue(false);
-      await expect(
-        service.update(ACTOR, 'admin-2', { roleId: 'role-9' }, CTX),
-      ).rejects.toThrow(ForbiddenException);
+      await expect(service.update(ACTOR, 'admin-2', { roleId: 'role-9' }, CTX)).rejects.toThrow(
+        ForbiddenException,
+      );
     });
 
     it('400s when the new role does not exist', async () => {
       prisma.adminUser.findFirst.mockResolvedValue(adminRow());
       resolver.hasAll.mockResolvedValue(true);
       prisma.role.findUnique.mockResolvedValue(null);
-      await expect(
-        service.update(ACTOR, 'admin-2', { roleId: 'role-9' }, CTX),
-      ).rejects.toThrow(BadRequestException);
+      await expect(service.update(ACTOR, 'admin-2', { roleId: 'role-9' }, CTX)).rejects.toThrow(
+        BadRequestException,
+      );
     });
 
     it('changes the role, bumps version, and audits as roles.assign', async () => {

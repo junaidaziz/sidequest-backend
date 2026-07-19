@@ -32,7 +32,12 @@ describe('RoleController', () => {
   });
 
   it('updateRolePermissions passes actor + context', async () => {
-    await controller.updateRolePermissions(ACTOR, 'r', { permissionKeys: ['users.view'] }, '1.2.3.4');
+    await controller.updateRolePermissions(
+      ACTOR,
+      'r',
+      { permissionKeys: ['users.view'] },
+      '1.2.3.4',
+    );
     expect(service.updateRolePermissions).toHaveBeenCalledWith(
       ACTOR,
       'r',
