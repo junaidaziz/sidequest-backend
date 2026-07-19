@@ -92,6 +92,29 @@ describe('StorageService', () => {
     });
   });
 
+  describe('buildCmsAssetKey', () => {
+    it.each([
+      ['image/jpeg', 'jpg'],
+      ['image/png', 'png'],
+      ['image/webp', 'webp'],
+      ['image/svg+xml', 'svg'],
+    ])('maps %s to a cms/<prefix>/<uuid>.%s key (no userId segment)', (mime, ext) => {
+      const key = service.buildCmsAssetKey('screenshots', mime);
+      expect(key).toMatch(new RegExp(`^cms/screenshots/[0-9a-f-]{36}\\.${ext}$`));
+    });
+
+    it('permits SVG (unlike the user-facing proof/avatar allow-list)', () => {
+      expect(() => service.buildCmsAssetKey('testimonials', 'image/svg+xml')).not.toThrow();
+      expect(() => service.buildAvatarKey('user-1', 'image/svg+xml')).toThrow(BadRequestException);
+    });
+
+    it('rejects an unsupported MIME type with 400', () => {
+      expect(() => service.buildCmsAssetKey('screenshots', 'application/pdf')).toThrow(
+        BadRequestException,
+      );
+    });
+  });
+
   describe('deleteObject', () => {
     it('sends a DeleteObjectCommand for the given key to the configured bucket', async () => {
       await service.deleteObject('avatars/u/abc.png');

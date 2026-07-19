@@ -26,6 +26,8 @@ import { EmailModule } from './email/email.module';
 import { AuditLogModule } from './audit-log/audit-log.module';
 import { AdminAuthModule } from './admin-auth/admin-auth.module';
 import { RbacModule } from './rbac/rbac.module';
+import { CmsModule } from './cms/cms.module';
+import { AppConfigModule } from './app-config/app-config.module';
 
 /**
  * `Number(...)` of a non-numeric env value silently produces NaN, which would
@@ -109,6 +111,9 @@ function bullConnectionFromRedisUrl(redisUrl: string): {
     AuditLogModule,
     AdminAuthModule,
     RbacModule,
+    // Phase 7 — CMS + application config (public cached reads + admin CRUD).
+    CmsModule,
+    AppConfigModule,
   ],
   controllers: [AppController],
   providers: [

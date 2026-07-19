@@ -21,6 +21,27 @@ export const ALLOWED_IMAGE_MIME_TYPES: Readonly<Record<string, string>> = {
   'image/webp': 'webp',
 };
 
+/**
+ * CMS-specific image allow-list. A superset of ALLOWED_IMAGE_MIME_TYPES that
+ * additionally permits SVG — CMS content legitimately needs vector icons/logos.
+ * SVG is a stored-XSS vector, so any SVG accepted under this list MUST be routed
+ * through `sanitizeSvg` before storage (see CmsAssetService). Kept SEPARATE from
+ * the user-facing proof/avatar allow-list on purpose: raw SVG must never become
+ * acceptable on user-upload surfaces just because CMS needs it.
+ */
+export const CMS_ALLOWED_IMAGE_MIME_TYPES: Readonly<Record<string, string>> = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/svg+xml': 'svg',
+};
+
+/** MIME type of SVG — the one CMS-allowed type that requires sanitization. */
+export const SVG_MIME_TYPE = 'image/svg+xml';
+
+/** Upper bound on a CMS asset upload (screenshot/testimonial avatar/cover/icon). */
+export const MAX_CMS_ASSET_BYTES = 5 * 1024 * 1024;
+
 /** Upper bound on a proof photo upload, enforced by the controller's Multer limits. */
 export const MAX_PROOF_PHOTO_BYTES = 10 * 1024 * 1024;
 
@@ -88,6 +109,22 @@ export class StorageService {
    */
   buildTaskAttachmentKey(userId: string, contentType: string): string {
     return this.buildObjectKey('task-attachments', userId, contentType);
+  }
+
+  /**
+   * Builds a namespaced, collision-free object key for a CMS asset. Unlike the
+   * three per-user builders above, CMS assets are NOT user-owned, so there is no
+   * `userId` segment — they live under `cms/<prefix>/…` (e.g. `cms/screenshots/`,
+   * `cms/testimonials/`). Validates against the CMS-specific allow-list (which
+   * permits SVG); the caller (CmsAssetService) is responsible for sanitizing any
+   * SVG body before upload.
+   */
+  buildCmsAssetKey(prefix: string, contentType: string): string {
+    const ext = CMS_ALLOWED_IMAGE_MIME_TYPES[contentType];
+    if (!ext) {
+      throw new BadRequestException('UNSUPPORTED_IMAGE_TYPE');
+    }
+    return `cms/${prefix}/${randomUUID()}.${ext}`;
   }
 
   /**
