@@ -1,4 +1,4 @@
-import { forwardRef, Module } from '@nestjs/common';
+import { Global, Module } from '@nestjs/common';
 import { AdminAuthModule } from '../admin-auth/admin-auth.module';
 import { AuditLogModule } from '../audit-log/audit-log.module';
 import { EmailModule } from '../email/email.module';
@@ -13,14 +13,15 @@ import { RoleService } from './role.service';
  * RBAC module: the @RequirePermission decorator + PermissionGuard, the Redis-cached
  * effective-permission resolver, and admin-user / role / permission management.
  *
- * Imports AdminAuthModule (for the admin-jwt guard/strategy + AdminAuthService +
- * AdminMfaService) and AuditLogModule via forwardRef (audit-log's viewer needs
- * this module's PermissionGuard, while this module needs AuditLogService — an
- * intentional, resolved cycle). Exports the guard + resolver so any admin module
- * can permission-gate its own routes.
+ * @Global (like PrismaModule/RedisModule) so its PermissionGuard + resolver are
+ * available to any admin module that permission-gates a route — notably the
+ * audit-log viewer — WITHOUT that module having to import RbacModule. That is what
+ * keeps the module graph acyclic: rbac depends on admin-auth + audit-log, and
+ * nothing depends back on rbac via a file-level import.
  */
+@Global()
 @Module({
-  imports: [AdminAuthModule, EmailModule, forwardRef(() => AuditLogModule)],
+  imports: [AdminAuthModule, EmailModule, AuditLogModule],
   controllers: [AdminManagementController, RoleController],
   providers: [PermissionResolverService, PermissionGuard, AdminManagementService, RoleService],
   exports: [PermissionResolverService, PermissionGuard],
