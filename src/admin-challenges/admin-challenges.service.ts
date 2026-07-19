@@ -18,6 +18,7 @@ import {
   AdminMissionPageDto,
 } from './dto/mission-admin-response.dto';
 import { UpdateMissionDto } from './dto/update-mission.dto';
+import { MissionMilestone } from './types/mission-milestone';
 
 /** Polymorphic audit target type for every action in this module. */
 const AUDIT_TARGET = 'Mission';
@@ -67,8 +68,9 @@ interface LockedMissionRow {
  *
  * "Approve" and "publish" are the same action here: Missions have no separate
  * user-submission source (the peer-to-peer user-generated system is the distinct
- * `UserTask` model, out of scope), so there is no approval queue to model — the
- * `challenges.approve` permission simply also authorizes publish.
+ * `UserTask` model, out of scope), so there is no approval queue to model. The
+ * publish routes are gated by `challenges.publish`; a distinct `challenges.approve`
+ * permission was removed from the catalog in Phase 9 because it gated no route.
  *
  * Deletes/unpublishes never touch `Completion`/`SavedMission` rows: soft-delete
  * only sets `deletedAt`, so historical records keep pointing at a real Mission.
@@ -214,13 +216,19 @@ export class AdminChallengesService {
    * also the "approve" action (Missions have no separate submission queue). Locks
    * the row so a concurrent publish/unpublish can't race the transition. 409 if
    * the mission is already published.
+   *
+   * Any non-`Published` status is publishable (only the already-`Published` guard
+   * exists). This is deliberate: it accepts the reserved `PendingApproval` status
+   * too, so IF a future user-submission flow ever produces a `PendingApproval`
+   * mission, this endpoint already serves as its approve action with no code
+   * change. Today no path creates `PendingApproval`, so that branch is inert.
    */
   async publish(
     id: string,
     ctx: AdminMissionActionContext,
     reason: string | null = null,
   ): Promise<AdminMissionDetailDto> {
-    const updated = await this.transition(id, (row) => {
+    const { before, mission } = await this.transition(id, (row) => {
       if (row.status === MissionStatus.Published) {
         throw new ConflictException('Mission is already published');
       }
@@ -232,14 +240,15 @@ export class AdminChallengesService {
       };
     });
 
+    // Publishing always flips isActive false→true, so the live pool changes.
     await this.invalidatePool();
     await this.recordAudit('challenges.publish', id, ctx, {
-      previous: { status: 'unpublished' },
+      previous: { status: before.status, isActive: before.isActive },
       next: { status: MissionStatus.Published, isActive: true },
       reason,
     });
     this.logger.log(`Mission ${id} published by admin ${ctx.actorAdminUserId}`);
-    return this.buildDetail(updated);
+    return this.buildDetail(mission);
   }
 
   /**
@@ -253,7 +262,7 @@ export class AdminChallengesService {
     ctx: AdminMissionActionContext,
     reason: string | null = null,
   ): Promise<AdminMissionDetailDto> {
-    const updated = await this.transition(id, (row) => {
+    const { before, mission } = await this.transition(id, (row) => {
       if (row.status !== MissionStatus.Published) {
         throw new ConflictException('Only a published mission can be unpublished');
       }
@@ -265,14 +274,15 @@ export class AdminChallengesService {
       };
     });
 
+    // A published mission is always live, so unpublishing always changes the pool.
     await this.invalidatePool();
     await this.recordAudit('challenges.unpublish', id, ctx, {
-      previous: { status: MissionStatus.Published, isActive: true },
+      previous: { status: before.status, isActive: before.isActive },
       next: { status: MissionStatus.Draft, isActive: false },
       reason,
     });
     this.logger.log(`Mission ${id} unpublished by admin ${ctx.actorAdminUserId}`);
-    return this.buildDetail(updated);
+    return this.buildDetail(mission);
   }
 
   /**
@@ -285,21 +295,25 @@ export class AdminChallengesService {
     ctx: AdminMissionActionContext,
     reason: string | null = null,
   ): Promise<AdminMissionDetailDto> {
-    const updated = await this.transition(id, (row) => {
+    const { before, mission } = await this.transition(id, (row) => {
       if (row.status === MissionStatus.Archived) {
         throw new ConflictException('Mission is already archived');
       }
       return { status: MissionStatus.Archived, isActive: false };
     });
 
-    await this.invalidatePool();
+    // Only bust the cache when the mission was actually live: archiving a Draft
+    // (already isActive:false) leaves a still-correct cache entry untouched.
+    if (before.isActive) {
+      await this.invalidatePool();
+    }
     await this.recordAudit('challenges.archive', id, ctx, {
-      previous: { isActive: true },
+      previous: { status: before.status, isActive: before.isActive },
       next: { status: MissionStatus.Archived, isActive: false },
       reason,
     });
     this.logger.log(`Mission ${id} archived by admin ${ctx.actorAdminUserId}`);
-    return this.buildDetail(updated);
+    return this.buildDetail(mission);
   }
 
   /** Sets/clears the `featured` flag. Does not affect generator visibility. */
@@ -339,35 +353,41 @@ export class AdminChallengesService {
     const source = await this.findActive(id);
     const title = await this.findAvailableCopyTitle(source.title);
 
-    const clone = await this.prisma.mission.create({
-      data: {
-        title,
-        category: source.category,
-        description: source.description,
-        fullBrief: source.fullBrief,
-        proofRequirement: source.proofRequirement,
-        estimatedMinutes: source.estimatedMinutes,
-        xpReward: source.xpReward,
-        difficulty: source.difficulty,
-        difficultyDots: source.difficultyDots,
-        crewTags: source.crewTags,
-        settingTags: source.settingTags,
-        costTier: source.costTier,
-        sponsorName: source.sponsorName,
-        startDate: source.startDate,
-        endDate: source.endDate,
-        participantLimit: source.participantLimit,
-        milestones: this.cloneJson(source.milestones),
-        safetyNotice: source.safetyNotice,
-        iconKey: source.iconKey,
-        status: MissionStatus.Draft,
-        isActive: false,
-        featured: false,
-        approvedAt: null,
-        approvedByAdminId: null,
-        createdByAdminId: ctx.actorAdminUserId,
-      },
-    });
+    // `findAvailableCopyTitle` + `create` is not atomic — two concurrent
+    // duplicates of the same source can both see the same "(Copy)" title free and
+    // race the unique constraint. Wrap in `runUniqueTitle` so the loser gets a
+    // clean 409 instead of an unhandled 500, exactly like create()/update().
+    const clone = await this.runUniqueTitle(() =>
+      this.prisma.mission.create({
+        data: {
+          title,
+          category: source.category,
+          description: source.description,
+          fullBrief: source.fullBrief,
+          proofRequirement: source.proofRequirement,
+          estimatedMinutes: source.estimatedMinutes,
+          xpReward: source.xpReward,
+          difficulty: source.difficulty,
+          difficultyDots: source.difficultyDots,
+          crewTags: source.crewTags,
+          settingTags: source.settingTags,
+          costTier: source.costTier,
+          sponsorName: source.sponsorName,
+          startDate: source.startDate,
+          endDate: source.endDate,
+          participantLimit: source.participantLimit,
+          milestones: this.cloneJson(source.milestones),
+          safetyNotice: source.safetyNotice,
+          iconKey: source.iconKey,
+          status: MissionStatus.Draft,
+          isActive: false,
+          featured: false,
+          approvedAt: null,
+          approvedByAdminId: null,
+          createdByAdminId: ctx.actorAdminUserId,
+        },
+      }),
+    );
 
     await this.recordAudit('challenges.create', clone.id, ctx, {
       previous: { duplicatedFromMissionId: source.id },
@@ -429,7 +449,7 @@ export class AdminChallengesService {
   private async transition(
     id: string,
     decide: (row: LockedMissionRow) => Prisma.MissionUpdateInput,
-  ): Promise<Mission> {
+  ): Promise<{ before: LockedMissionRow; mission: Mission }> {
     return this.prisma.$transaction(async (tx) => {
       const [row] = await tx.$queryRaw<LockedMissionRow[]>`
         SELECT id, status, "isActive", "deletedAt"
@@ -440,7 +460,8 @@ export class AdminChallengesService {
         throw new NotFoundException('Mission not found');
       }
       const data = decide(row);
-      return tx.mission.update({ where: { id }, data });
+      const mission = await tx.mission.update({ where: { id }, data });
+      return { before: row, mission };
     });
   }
 
@@ -594,7 +615,9 @@ export class AdminChallengesService {
       startDate: mission.startDate,
       endDate: mission.endDate,
       participantLimit: mission.participantLimit,
-      milestones: mission.milestones,
+      // Stored as validated `MissionMilestoneDto[]` on write; cast back to the
+      // explicit contract for the response (rather than leaking Prisma.JsonValue).
+      milestones: (mission.milestones as unknown as MissionMilestone[] | null) ?? null,
       safetyNotice: mission.safetyNotice,
       iconKey: mission.iconKey,
       createdByAdminId: mission.createdByAdminId,
