@@ -57,13 +57,21 @@ export class CreateMissionDto {
   @IsEnum(MissionCategory)
   category!: MissionCategory;
 
-  @ApiProperty({ description: 'Short teaser shown on the results card', minLength: 1, maxLength: 500 })
+  @ApiProperty({
+    description: 'Short teaser shown on the results card',
+    minLength: 1,
+    maxLength: 500,
+  })
   @IsString()
   @MinLength(1)
   @MaxLength(500)
   description!: string;
 
-  @ApiProperty({ description: 'Full brief shown in the detail sheet', minLength: 1, maxLength: 5000 })
+  @ApiProperty({
+    description: 'Full brief shown in the detail sheet',
+    minLength: 1,
+    maxLength: 5000,
+  })
   @IsString()
   @MinLength(1)
   @MaxLength(5000)
@@ -91,7 +99,11 @@ export class CreateMissionDto {
   @IsEnum(MissionDifficulty)
   difficulty!: MissionDifficulty;
 
-  @ApiProperty({ description: 'Filled difficulty dots shown in the UI (1-3)', minimum: 1, maximum: 3 })
+  @ApiProperty({
+    description: 'Filled difficulty dots shown in the UI (1-3)',
+    minimum: 1,
+    maximum: 3,
+  })
   @IsInt()
   @Min(1)
   @Max(3)
@@ -119,7 +131,11 @@ export class CreateMissionDto {
   @IsIn(AUTHORABLE_SETTING_VALUES, { each: true })
   settingTags!: string[];
 
-  @ApiProperty({ description: '0=Free, 1=Under $10, 2=Under $30, 3=No limit', minimum: 0, maximum: 3 })
+  @ApiProperty({
+    description: '0=Free, 1=Under $10, 2=Under $30, 3=No limit',
+    minimum: 0,
+    maximum: 3,
+  })
   @IsInt()
   @Min(0)
   @Max(3)
@@ -141,14 +157,21 @@ export class CreateMissionDto {
   @IsISO8601()
   endDate?: string;
 
-  @ApiPropertyOptional({ description: 'Max participants, null = unlimited', minimum: 1, maximum: 10000000 })
+  @ApiPropertyOptional({
+    description: 'Max participants, null = unlimited',
+    minimum: 1,
+    maximum: 10000000,
+  })
   @IsOptional()
   @IsInt()
   @Min(1)
   @Max(10000000)
   participantLimit?: number;
 
-  @ApiPropertyOptional({ description: 'Ordered milestone/checkpoint definitions', type: [MissionMilestoneDto] })
+  @ApiPropertyOptional({
+    description: 'Ordered milestone/checkpoint definitions',
+    type: [MissionMilestoneDto],
+  })
   @IsOptional()
   @IsArray()
   @ValidateNested({ each: true })
