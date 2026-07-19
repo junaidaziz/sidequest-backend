@@ -6,7 +6,6 @@ import {
   HttpCode,
   HttpStatus,
   Ip,
-  Param,
   Post,
   UseGuards,
 } from '@nestjs/common';
@@ -202,19 +201,18 @@ export class AdminAuthController {
     return { success: true };
   }
 
-  @Post('invitations/:token/accept')
+  @Post('invitations/accept')
   @Throttle(AUTH_THROTTLE)
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Accept an admin invitation by setting a password' })
+  @ApiOperation({ summary: 'Accept an admin invitation by setting a password (token in body)' })
   @ApiResponse({ status: 200, type: AdminTokenPairDto })
   @ApiResponse({ status: 400, description: 'Invalid/expired invitation or weak password' })
   @ApiResponse({ status: 429, description: 'Too many requests' })
   acceptInvitation(
-    @Param('token') token: string,
     @Body() dto: AcceptInvitationDto,
     @Ip() ip: string,
     @Headers('user-agent') userAgent?: string,
   ): Promise<AdminTokenPairDto> {
-    return this.service.acceptInvitation(token, dto, this.ctx(ip, userAgent));
+    return this.service.acceptInvitation(dto.token, dto, this.ctx(ip, userAgent));
   }
 }

@@ -21,7 +21,7 @@ import { AdminSuccessResponseDto } from '../admin-auth/dto/generic-response.dto'
 import { AdminManagementService } from './admin-management.service';
 import { RequirePermission } from './decorators/require-permission.decorator';
 import { InviteAdminDto } from './dto/invite-admin.dto';
-import { AdminUserDto, InvitedAdminDto } from './dto/rbac-response.dto';
+import { AdminUserDto } from './dto/rbac-response.dto';
 import { UpdateAdminDto } from './dto/update-admin.dto';
 import { PermissionGuard } from './guards/permission.guard';
 
@@ -50,7 +50,7 @@ export class AdminManagementController {
   @RequirePermission('admins.manage')
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({ summary: 'Invite a new admin (creates a pending account + emails a link)' })
-  @ApiResponse({ status: 201, type: InvitedAdminDto })
+  @ApiResponse({ status: 201, type: AdminUserDto })
   @ApiResponse({ status: 409, description: 'Email already exists' })
   @ApiResponse({ status: 403, description: 'Missing admins.manage permission' })
   invite(
@@ -58,7 +58,7 @@ export class AdminManagementController {
     @Body() dto: InviteAdminDto,
     @Ip() ip: string,
     @Headers('user-agent') userAgent?: string,
-  ): Promise<InvitedAdminDto> {
+  ): Promise<AdminUserDto> {
     return this.service.invite(actor, dto, this.ctx(ip, userAgent));
   }
 

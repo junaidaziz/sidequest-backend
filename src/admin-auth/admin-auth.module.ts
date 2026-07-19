@@ -10,6 +10,7 @@ import { AdminCryptoService } from './admin-crypto.service';
 import { AdminLockoutService } from './admin-lockout.service';
 import { AdminMfaService } from './admin-mfa.service';
 import { AdminTokenService } from './admin-token.service';
+import { AdminJwtAuthGuard } from './guards/admin-jwt-auth.guard';
 import { AdminJwtStrategy } from './strategies/admin-jwt.strategy';
 
 /**
@@ -39,7 +40,11 @@ import { AdminJwtStrategy } from './strategies/admin-jwt.strategy';
     AdminLockoutService,
     AdminCryptoService,
     AdminJwtStrategy,
+    // Registered as a provider (and exported) so it resolves through DI even if
+    // it ever gains a constructor dependency — three other modules' controllers
+    // apply it directly.
+    AdminJwtAuthGuard,
   ],
-  exports: [AdminAuthService, AdminMfaService, PassportModule, JwtModule],
+  exports: [AdminAuthService, AdminMfaService, AdminJwtAuthGuard, PassportModule, JwtModule],
 })
 export class AdminAuthModule {}

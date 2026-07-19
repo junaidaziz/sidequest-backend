@@ -1,5 +1,6 @@
 import { BadRequestException, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { createHash } from 'crypto';
 import { AdminAuthService } from './admin-auth.service';
 import { AdminLockoutService } from './admin-lockout.service';
 import { AdminMfaService } from './admin-mfa.service';
@@ -109,10 +110,13 @@ describe('AdminAuthService', () => {
       );
     });
 
-    it('rejects a locked account', async () => {
+    it('rejects a locked account with the generic error (no existence leak)', async () => {
       prisma.adminUser.findUnique.mockResolvedValue(adminRow());
       lockout.isLocked.mockReturnValue(true);
-      await expect(service.login(dto, CTX)).rejects.toThrow('locked');
+      await expect(service.login(dto, CTX)).rejects.toThrow('Invalid email or password');
+      expect(audit.record).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: 'account_locked', result: 'FAILURE' }),
+      );
     });
 
     it('records a failure and 401s on a wrong password', async () => {
@@ -145,22 +149,31 @@ describe('AdminAuthService', () => {
   describe('completeMfaChallenge', () => {
     const dto = { challengeId: 'c1', code: '123456' };
 
-    it('401s on an unknown/expired challenge', async () => {
+    it('401s with the generic error on an unknown/expired challenge', async () => {
       redis.get.mockResolvedValue(null);
-      await expect(service.completeMfaChallenge(dto, CTX)).rejects.toThrow(UnauthorizedException);
+      await expect(service.completeMfaChallenge(dto, CTX)).rejects.toThrow(
+        'Invalid or expired MFA challenge',
+      );
     });
 
-    it('401s when the referenced admin is gone', async () => {
+    it('consumes the challenge and 401s (generic) when the referenced admin is gone', async () => {
       redis.get.mockResolvedValue('admin-1');
       prisma.adminUser.findUnique.mockResolvedValue(null);
-      await expect(service.completeMfaChallenge(dto, CTX)).rejects.toThrow(UnauthorizedException);
+      await expect(service.completeMfaChallenge(dto, CTX)).rejects.toThrow(
+        'Invalid or expired MFA challenge',
+      );
+      expect(redis.del).toHaveBeenCalled();
     });
 
-    it('401s + audits failure on a bad code', async () => {
+    it('invalidates the challenge, audits failure, and returns the generic error on a bad code', async () => {
       redis.get.mockResolvedValue('admin-1');
       prisma.adminUser.findUnique.mockResolvedValue(adminRow({ mfaEnabledAt: new Date() }));
       mfa.verifyLoginCode.mockResolvedValue(false);
-      await expect(service.completeMfaChallenge(dto, CTX)).rejects.toThrow('Invalid verification');
+      await expect(service.completeMfaChallenge(dto, CTX)).rejects.toThrow(
+        'Invalid or expired MFA challenge',
+      );
+      // A single wrong code deletes the challenge key (blocks distributed brute force).
+      expect(redis.del).toHaveBeenCalled();
       expect(audit.record).toHaveBeenCalledWith(
         expect.objectContaining({ action: 'admin.auth.mfa.challenge', result: 'FAILURE' }),
       );
@@ -296,24 +309,34 @@ describe('AdminAuthService', () => {
   });
 
   describe('resetPassword', () => {
-    const dto = { token: 'raw', newPassword: 'Abcdefgh12!@' };
+    // The token is `<adminId>.<random>`; the stored value is its sha256 hash.
+    const rawToken = 'admin-1.some-random-token';
+    const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+    const dto = { token: rawToken, newPassword: 'Abcdefgh12!@' };
 
-    it('400s on an invalid/expired token', async () => {
-      redis.get.mockResolvedValue(null);
+    it('400s on a malformed token (no admin-id prefix) without touching Redis', async () => {
+      await expect(
+        service.resetPassword({ token: 'no-dot', newPassword: 'Abcdefgh12!@' }, CTX),
+      ).rejects.toThrow(BadRequestException);
+      expect(redis.get).not.toHaveBeenCalled();
+    });
+
+    it('400s when the stored hash does not match (stale/invalidated link)', async () => {
+      redis.get.mockResolvedValue('a-different-hash');
       await expect(service.resetPassword(dto, CTX)).rejects.toThrow(BadRequestException);
     });
 
     it('sets a new password and revokes sessions on success', async () => {
-      redis.get.mockResolvedValue('admin-1');
+      redis.get.mockResolvedValue(tokenHash);
       prisma.adminUser.findUnique.mockResolvedValue(adminRow());
       await service.resetPassword(dto, CTX);
       expect(prisma.$transaction).toHaveBeenCalled();
-      expect(redis.del).toHaveBeenCalled();
+      expect(redis.del).toHaveBeenCalledWith('admin:pwreset:admin-1');
     });
   });
 
   describe('acceptInvitation', () => {
-    const dto = { password: 'Abcdefgh12!@' };
+    const dto = { token: 't', password: 'Abcdefgh12!@' };
 
     it('400s on an invalid invitation', async () => {
       redis.get.mockResolvedValue(null);
@@ -326,12 +349,14 @@ describe('AdminAuthService', () => {
       await expect(service.acceptInvitation('t', dto, CTX)).rejects.toThrow(BadRequestException);
     });
 
-    it('activates the account and auto-logs in on success', async () => {
+    it('activates the account and auto-logs in via a single transaction', async () => {
       redis.get.mockResolvedValue('admin-1');
       prisma.adminUser.findUnique.mockResolvedValue(adminRow({ status: 'Invited' }));
-      prisma.adminUser.update.mockResolvedValue(adminRow({ status: 'Active' }));
+      // The activation update + session insert run atomically in one $transaction.
+      prisma.$transaction.mockResolvedValueOnce([adminRow({ status: 'Active' }), {}]);
       const res = await service.acceptInvitation('t', dto, CTX);
       expect(res.accessToken).toBe('access');
+      expect(prisma.$transaction).toHaveBeenCalled();
       expect(redis.del).toHaveBeenCalled();
     });
   });

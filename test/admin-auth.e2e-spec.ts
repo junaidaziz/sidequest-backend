@@ -164,6 +164,45 @@ describe('Admin auth + RBAC (e2e)', () => {
     });
   });
 
+  describe('MFA challenge is single-use', () => {
+    it('invalidates the challenge after one wrong code (no distributed brute force)', async () => {
+      const admin = await makeAdmin(`mfa-bf-${suffix}@e2e.com`, fullRoleId);
+      const login = await request(server())
+        .post('/admin/auth/login')
+        .send({ email: admin.email, password: PASSWORD })
+        .expect(200);
+      const token = login.body.accessToken as string;
+      const setup = await request(server())
+        .post('/admin/auth/mfa/setup')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      const secret = setup.body.secret as string;
+      await request(server())
+        .post('/admin/auth/mfa/verify')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ code: generateTotp(secret) })
+        .expect(200);
+
+      const login2 = await request(server())
+        .post('/admin/auth/login')
+        .send({ email: admin.email, password: PASSWORD })
+        .expect(200);
+      const challengeId = login2.body.challengeId as string;
+
+      // One wrong code burns the challenge.
+      await request(server())
+        .post('/admin/auth/mfa/challenge')
+        .send({ challengeId, code: '000000' })
+        .expect(401);
+
+      // The SAME challengeId is now dead even with a correct code.
+      await request(server())
+        .post('/admin/auth/mfa/challenge')
+        .send({ challengeId, code: generateTotp(secret) })
+        .expect(401);
+    });
+  });
+
   describe('logout-all revocation', () => {
     it('invalidates a still-live access token on the next request', async () => {
       const admin = await makeAdmin(`logoutall-${suffix}@e2e.com`, fullRoleId);

@@ -71,13 +71,10 @@ describe('AdminAuthController', () => {
     ).toEqual({ success: true });
   });
 
-  it('accept-invitation delegates with the path token', async () => {
-    await controller.acceptInvitation('tok', { password: 'Abcdefgh12!@' }, '1.2.3.4');
-    expect(service.acceptInvitation).toHaveBeenCalledWith(
-      'tok',
-      { password: 'Abcdefgh12!@' },
-      expect.any(Object),
-    );
+  it('accept-invitation delegates with the token pulled from the body', async () => {
+    const dto = { token: 'tok', password: 'Abcdefgh12!@' };
+    await controller.acceptInvitation(dto, '1.2.3.4');
+    expect(service.acceptInvitation).toHaveBeenCalledWith('tok', dto, expect.any(Object));
   });
 
   it('refresh delegates', async () => {

@@ -15,7 +15,7 @@ import { AuditLogService } from '../audit-log/audit-log.service';
 import { AuditResult } from '../audit-log/types/audit';
 import { EmailService } from '../email/email.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { AdminUserDto, InvitedAdminDto } from './dto/rbac-response.dto';
+import { AdminUserDto } from './dto/rbac-response.dto';
 import { InviteAdminDto } from './dto/invite-admin.dto';
 import { UpdateAdminDto } from './dto/update-admin.dto';
 import { PermissionResolverService } from './permission-resolver.service';
@@ -68,7 +68,7 @@ export class AdminManagementService {
     actor: AuthAdmin,
     dto: InviteAdminDto,
     ctx: AdminRequestContext,
-  ): Promise<InvitedAdminDto> {
+  ): Promise<AdminUserDto> {
     const role = await this.prisma.role.findUnique({ where: { id: dto.roleId } });
     if (!role) {
       throw new BadRequestException('Role not found');
@@ -95,6 +95,12 @@ export class AdminManagementService {
       throw error;
     }
 
+    // The raw invite token is delivered ONLY via the emailed accept link — it is
+    // never returned in the API response. Returning it would let any admin with
+    // admins.manage claim someone else's invited account before the real invitee
+    // sees the email, defeating the "controls the mailbox" guarantee of invite-
+    // by-email. (Until a real email provider is wired the invite email is a
+    // console no-op; end-to-end acceptance is an accepted, documented gap.)
     const inviteToken = await this.adminAuth.issueInviteToken(created.id);
     const acceptUrl = `${this.portalUrl}/admin/accept-invite?token=${inviteToken}`;
     await this.email.sendAdminInvite(created.email, actor.email, acceptUrl);
@@ -111,9 +117,7 @@ export class AdminManagementService {
       userAgent: ctx.userAgent,
     });
 
-    // Returning the raw token is a dev-only convenience while email is a no-op —
-    // see InvitedAdminDto. Remove once a real email provider is wired.
-    return { ...this.toDto(created, created.role), inviteToken };
+    return this.toDto(created, created.role);
   }
 
   /** Edits display name and/or role. Role change requires the caller's roles.assign. */
@@ -268,7 +272,9 @@ export class AdminManagementService {
       mfaEnabled: admin.mfaEnabledAt !== null,
       mustChangePassword: admin.mustChangePassword,
       lastLoginAt: admin.lastLoginAt,
-      lockedUntil: admin.lockedUntil,
+      // Expose only a boolean — never the exact lockout-expiry timestamp, so a
+      // locked-out attacker can't read when their next attempt window opens.
+      isLocked: admin.lockedUntil !== null && admin.lockedUntil.getTime() > Date.now(),
       createdAt: admin.createdAt,
     };
   }

@@ -104,7 +104,7 @@ describe('AdminManagementService', () => {
       ).rejects.toThrow(BadRequestException);
     });
 
-    it('creates a pending admin, issues a token, emails a link', async () => {
+    it('creates a pending admin, issues a token, emails a link — but never returns the token', async () => {
       prisma.role.findUnique.mockResolvedValue({ id: 'role-1' });
       prisma.adminUser.create.mockResolvedValue(adminRow({ status: 'Invited' }));
       const res = await service.invite(
@@ -112,7 +112,10 @@ describe('AdminManagementService', () => {
         { email: 'a@b.com', displayName: 'A', roleId: 'role-1' },
         CTX,
       );
-      expect(res.inviteToken).toBe('raw-token');
+      // The raw token is emailed only — it must NOT leak in the API response.
+      expect((res as unknown as Record<string, unknown>).inviteToken).toBeUndefined();
+      expect(res.id).toBe('admin-2');
+      expect(adminAuth.issueInviteToken).toHaveBeenCalledWith('admin-2');
       expect(email.sendAdminInvite).toHaveBeenCalled();
       expect(audit.record).toHaveBeenCalled();
     });

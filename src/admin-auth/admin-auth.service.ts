@@ -27,6 +27,12 @@ import { AuthAdmin } from './types/admin-jwt-payload.interface';
 
 const BCRYPT_ROUNDS = 12;
 const GENERIC_AUTH_ERROR = 'Invalid email or password';
+/**
+ * One generic error for every MFA-challenge failure (unknown/expired challenge,
+ * invalid referenced admin, or wrong code) so an attacker can't distinguish a
+ * still-alive challengeId from a wrong code.
+ */
+const GENERIC_CHALLENGE_ERROR = 'Invalid or expired MFA challenge';
 /** Same-cost dummy compare on the unknown-account path — closes the enumeration timing leak. */
 const DUMMY_BCRYPT_HASH = '$2b$12$NRa8c1JQWgpx8Ftwwgz8VOc967Tx.VK9IeZ02zmPkAFFnoiY0bnMK';
 
@@ -80,8 +86,14 @@ export class AdminAuthService {
     }
 
     if (this.lockout.isLocked(admin.lockedUntil)) {
+      // Return the SAME generic error (and a same-cost compare) as invalid
+      // credentials: the admin portal is a high-value target, so a distinct
+      // "locked" response would leak that the account exists. The lockout is
+      // still recorded in the audit log for operators; the acting user learns
+      // nothing that distinguishes a locked account from a wrong password.
+      await bcrypt.compare(dto.password, admin.passwordHash);
       await this.auditLogin(admin.id, dto.email, AuditResult.Failure, 'account_locked', ctx);
-      throw new UnauthorizedException('Account temporarily locked. Try again later.');
+      throw new UnauthorizedException(GENERIC_AUTH_ERROR);
     }
 
     const passwordMatches = await bcrypt.compare(dto.password, admin.passwordHash);
@@ -112,20 +124,28 @@ export class AdminAuthService {
     dto: AdminMfaChallengeDto,
     ctx: AdminRequestContext,
   ): Promise<AdminTokenPairDto> {
-    const adminUserId = await this.redis.get(this.challengeKey(dto.challengeId));
+    const key = this.challengeKey(dto.challengeId);
+    const adminUserId = await this.redis.get(key);
     if (!adminUserId) {
-      throw new UnauthorizedException('Invalid or expired MFA challenge');
+      throw new UnauthorizedException(GENERIC_CHALLENGE_ERROR);
     }
     const admin = await this.prisma.adminUser.findUnique({
       where: { id: adminUserId },
       include: { role: true },
     });
     if (!admin || admin.deletedAt || admin.status === 'Suspended') {
-      throw new UnauthorizedException('Invalid or expired MFA challenge');
+      // Consume the challenge — never leave one pointing at an invalid admin.
+      await this.redis.del(key);
+      throw new UnauthorizedException(GENERIC_CHALLENGE_ERROR);
     }
 
     const ok = await this.mfa.verifyLoginCode(admin, dto.code);
     if (!ok) {
+      // A single wrong code invalidates the whole challenge (forcing a fresh
+      // password entry). Without this, the same challengeId stays valid for its
+      // 5-min TTL and could be brute-forced from many IPs, bypassing the per-IP
+      // throttle entirely (login-lockout only tracks password failures).
+      await this.redis.del(key);
       await this.audit.record({
         actorAdminUserId: admin.id,
         action: 'admin.auth.mfa.challenge',
@@ -136,10 +156,10 @@ export class AdminAuthService {
         ipAddress: ctx.ipAddress,
         userAgent: ctx.userAgent,
       });
-      throw new UnauthorizedException('Invalid verification code');
+      throw new UnauthorizedException(GENERIC_CHALLENGE_ERROR);
     }
 
-    await this.redis.del(this.challengeKey(dto.challengeId));
+    await this.redis.del(key);
     const pair = await this.createSession(admin, ctx);
     await this.audit.record({
       actorAdminUserId: admin.id,
@@ -330,27 +350,38 @@ export class AdminAuthService {
    */
   async forgotPassword(dto: AdminForgotPasswordDto, ctx: AdminRequestContext): Promise<void> {
     const admin = await this.prisma.adminUser.findUnique({ where: { email: dto.email } });
-    if (admin && !admin.deletedAt && admin.status !== 'Suspended') {
-      const raw = randomBytes(32).toString('base64url');
-      await this.redis.set(this.resetKey(raw), admin.id, 'EX', RESET_TTL_SECONDS);
-      const url = `${this.portalUrl}/admin/reset-password?token=${raw}`;
-      await this.email.sendAdminPasswordReset(admin.email, url);
-      await this.audit.record({
-        actorAdminUserId: admin.id,
-        action: 'admin.auth.password.forgot',
-        targetType: 'AdminUser',
-        targetId: admin.id,
-        result: AuditResult.Success,
-        ipAddress: ctx.ipAddress,
-        userAgent: ctx.userAgent,
-      });
+    if (!admin || admin.deletedAt || admin.status === 'Suspended') {
+      // Equalize timing with the token-minting path below so response time does
+      // not become an account-existence oracle (mirrors login's dummy compare).
+      await bcrypt.hash(dto.email, 1);
+      return;
     }
+
+    // The token embeds the admin id (`<adminId>.<random>`) and is stored keyed by
+    // admin id, so each new request OVERWRITES the previous entry — only the
+    // newest reset link is ever valid (no pile-up of live tokens in the TTL window).
+    const raw = `${admin.id}.${randomBytes(32).toString('base64url')}`;
+    await this.redis.set(this.resetKey(admin.id), this.hash(raw), 'EX', RESET_TTL_SECONDS);
+    const url = `${this.portalUrl}/admin/reset-password?token=${raw}`;
+    await this.email.sendAdminPasswordReset(admin.email, url);
+    await this.audit.record({
+      actorAdminUserId: admin.id,
+      action: 'admin.auth.password.forgot',
+      targetType: 'AdminUser',
+      targetId: admin.id,
+      result: AuditResult.Success,
+      ipAddress: ctx.ipAddress,
+      userAgent: ctx.userAgent,
+    });
   }
 
   /** Completes a reset: sets a new password and revokes all sessions (force re-login). */
   async resetPassword(dto: AdminResetPasswordDto, ctx: AdminRequestContext): Promise<void> {
-    const adminUserId = await this.redis.get(this.resetKey(dto.token));
-    if (!adminUserId) {
+    // The token carries its own admin id prefix; look up the single active token
+    // for that admin and verify the submitted token hashes to the stored value.
+    const adminUserId = this.parseResetTokenAdminId(dto.token);
+    const storedHash = adminUserId ? await this.redis.get(this.resetKey(adminUserId)) : null;
+    if (!adminUserId || !storedHash || storedHash !== this.hash(dto.token)) {
       throw new BadRequestException('Invalid or expired reset token');
     }
     const admin = await this.prisma.adminUser.findUnique({ where: { id: adminUserId } });
@@ -369,7 +400,7 @@ export class AdminAuthService {
         data: { revokedAt: new Date() },
       }),
     ]);
-    await this.redis.del(this.resetKey(dto.token));
+    await this.redis.del(this.resetKey(adminUserId));
     await this.audit.record({
       actorAdminUserId: admin.id,
       action: 'admin.auth.password.reset',
@@ -411,20 +442,38 @@ export class AdminAuthService {
     }
 
     const passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
-    const activated = await this.prisma.adminUser.update({
-      where: { id: admin.id },
-      data: {
-        passwordHash,
-        displayName: dto.displayName ?? admin.displayName,
-        status: 'Active',
-        mustChangePassword: false,
-        inviteAcceptedAt: new Date(),
-      },
-      include: { role: true },
-    });
+    const issued = await this.tokens.issue(admin.id);
+
+    // Activate the account and persist the session atomically — if the session
+    // insert failed, an already-activated account with a consumed invite token
+    // would leave inconsistent state. The Redis token deletion stays after the
+    // commit (it is idempotent on retry).
+    const [activated] = await this.prisma.$transaction([
+      this.prisma.adminUser.update({
+        where: { id: admin.id },
+        data: {
+          passwordHash,
+          displayName: dto.displayName ?? admin.displayName,
+          status: 'Active',
+          mustChangePassword: false,
+          inviteAcceptedAt: new Date(),
+        },
+        include: { role: true },
+      }),
+      this.prisma.adminSession.create({
+        data: {
+          id: issued.sessionId,
+          adminUserId: admin.id,
+          refreshTokenHash: issued.refreshTokenHash,
+          userAgent: ctx.userAgent ?? null,
+          ipAddress: ctx.ipAddress ?? null,
+          lastUsedAt: new Date(),
+          expiresAt: issued.expiresAt,
+        },
+      }),
+    ]);
     await this.redis.del(this.inviteKey(token));
 
-    const pair = await this.createSession(activated, ctx);
     await this.audit.record({
       actorAdminUserId: activated.id,
       action: 'admins.invite.accept',
@@ -434,7 +483,11 @@ export class AdminAuthService {
       ipAddress: ctx.ipAddress,
       userAgent: ctx.userAgent,
     });
-    return pair;
+    return {
+      accessToken: issued.accessToken,
+      refreshToken: issued.refreshToken,
+      admin: this.toProfile(activated, activated.role),
+    };
   }
 
   /** Signs a token pair and persists a new AdminSession row for it. */
@@ -486,8 +539,15 @@ export class AdminAuthService {
     return `admin:mfa:challenge:${id}`;
   }
 
-  private resetKey(rawToken: string): string {
-    return `admin:pwreset:${this.hash(rawToken)}`;
+  /** Reset tokens are keyed by admin id (one active token per admin — newest wins). */
+  private resetKey(adminUserId: string): string {
+    return `admin:pwreset:${adminUserId}`;
+  }
+
+  /** Extracts the `<adminId>.` prefix a reset token carries; null if malformed. */
+  private parseResetTokenAdminId(token: string): string | null {
+    const idx = token.indexOf('.');
+    return idx > 0 ? token.slice(0, idx) : null;
   }
 
   private inviteKey(rawToken: string): string {
