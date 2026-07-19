@@ -48,7 +48,10 @@ export interface CheckReceiptsJobData {
  * the push when either `pushEnabled` or the mapped category flag is false.
  */
 export const NOTIFICATION_CATEGORY: Readonly<
-  Record<NotificationType, 'taskEventsEnabled' | 'referralEventsEnabled' | 'accountEventsEnabled'>
+  Record<
+    NotificationType,
+    'taskEventsEnabled' | 'referralEventsEnabled' | 'accountEventsEnabled' | 'marketingEnabled'
+  >
 > = {
   [NotificationType.task_assigned]: 'taskEventsEnabled',
   [NotificationType.task_accepted]: 'taskEventsEnabled',
@@ -59,4 +62,7 @@ export const NOTIFICATION_CATEGORY: Readonly<
   [NotificationType.referral_registered]: 'referralEventsEnabled',
   [NotificationType.referral_reward_earned]: 'referralEventsEnabled',
   [NotificationType.account_event]: 'accountEventsEnabled',
+  // Campaign broadcasts are gated by the marketing opt-out (added Phase 3);
+  // like the other flags, absence of a preference row = enabled.
+  [NotificationType.campaign_broadcast]: 'marketingEnabled',
 };

@@ -75,6 +75,15 @@ model User {
   pushTokens             PushToken[]
   notificationPreference NotificationPreference?
 
+  /// Web platform (Phase 3). Additive back-relations only — no existing User
+  /// field is touched. A user can be a recipient of many notification campaigns,
+  /// file many moderation reports, be the target of many moderation actions, and
+  /// file many appeals.
+  campaignRecipients       NotificationCampaignRecipient[]
+  reportsMade              Report[]           @relation("ReportReporter")
+  moderationActionsAgainst ModerationAction[] @relation("ModerationTargetUser")
+  appeals                  Appeal[]           @relation("AppealAppellant")
+
   @@map("users")
 }
 
@@ -88,6 +97,17 @@ enum MissionDifficulty {
   Easy
   Medium
   Hard
+}
+
+/// Admin-authoring lifecycle for a Mission (Phase 3, web platform). Separate
+/// from the pre-existing `isActive` flag (which the mission generator still
+/// keys off, unchanged this phase): `status` drives the admin review/publish
+/// workflow. Existing seeded missions are backfilled as `Published`.
+enum MissionStatus {
+  Draft
+  PendingApproval
+  Published
+  Archived
 }
 
 /// Curated mission pool for the rules-filter generator. `crewTags` and
@@ -118,6 +138,30 @@ model Mission {
   /// 0=Free, 1=Under $10, 2=Under $30, 3=No limit — the mission's own cost ceiling.
   costTier          Int
   isActive          Boolean           @default(true)
+
+  /// Admin-authoring extensions (Phase 3, web platform). Missions were seed-file
+  /// only until now; these support the admin challenge-authoring workflow.
+  /// `status` defaults to Published so the existing curated seed pool (which is
+  /// live) is backfilled as Published on migration; admin-authored missions are
+  /// created explicitly as Draft by the Phase 9 service.
+  status            MissionStatus     @default(Published)
+  approvedAt        DateTime?
+  approvedByAdminId String?
+  approvedByAdmin   AdminUser?        @relation("MissionApprovedBy", fields: [approvedByAdminId], references: [id])
+  featured          Boolean           @default(false)
+  sponsorName       String?
+  startDate         DateTime?
+  endDate           DateTime?
+  participantLimit  Int?
+  /// Optional ordered milestone/checkpoint definitions for multi-step missions.
+  milestones        Json?
+  safetyNotice      String?
+  /// Icon identifier (design-system key), distinct from any uploaded media.
+  iconKey           String?
+  /// Nullable: existing seed-created missions predate admin authoring.
+  createdByAdminId  String?
+  createdByAdmin    AdminUser?        @relation("MissionCreatedBy", fields: [createdByAdminId], references: [id])
+
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
   deletedAt         DateTime?
@@ -125,6 +169,8 @@ model Mission {
   completions       Completion[]
   savedBy           SavedMission[]
 
+  @@index([status])
+  @@index([featured])
   @@map("missions")
 }
 
@@ -192,11 +238,18 @@ model Completion {
   /// foreign key: there is no in-app admin-user concept, only an
   /// x-admin-key-header-gated route (see AdminGuard).
   verifiedBy         String?
+  /// Real FK to the admin who manually verified this, set alongside the existing
+  /// free-text `verifiedBy` (which is kept as-is for the "auto" sentinel and old
+  /// rows). Null for auto-approved or not-yet-verified completions. Added in
+  /// Phase 3 — existing rows are untouched.
+  verifiedByAdminId  String?
+  verifiedByAdmin    AdminUser?         @relation("CompletionVerifiedBy", fields: [verifiedByAdminId], references: [id])
   /// Required when verificationStatus is set to Rejected; null otherwise.
   rejectionReason    String?
 
   @@index([userId])
   @@index([verificationStatus])
+  @@index([verifiedByAdminId])
   @@map("completions")
 }
 
@@ -433,6 +486,9 @@ enum NotificationType {
   referral_registered
   referral_reward_earned
   account_event
+  /// Marketing/announcement broadcast fanned out from a NotificationCampaign
+  /// (web admin). Gated by NotificationPreference.marketingEnabled.
+  campaign_broadcast
 }
 
 /// One in-app notification row per recipient per event. Always written
@@ -450,6 +506,10 @@ model Notification {
   data      Json?
   readAt    DateTime?
   createdAt DateTime         @default(now())
+
+  /// Campaign fan-out rows that point at this notification (web platform,
+  /// Phase 3). SetNull on delete keeps a campaign's delivery-stats row intact.
+  campaignRecipients NotificationCampaignRecipient[]
 
   @@index([userId])
   @@index([userId, readAt])
@@ -489,5 +549,699 @@ model NotificationPreference {
   taskEventsEnabled     Boolean  @default(true)
   referralEventsEnabled Boolean  @default(true)
   accountEventsEnabled  Boolean  @default(true)
+  /// Opt-in-by-default for marketing/campaign broadcasts, mirroring this model's
+  /// established "absence of a row = all enabled" convention. The campaign
+  /// broadcast job skips recipients whose row exists with this set to false.
+  marketingEnabled      Boolean  @default(true)
   updatedAt             DateTime @updatedAt
+}
+
+// ===========================================================================
+// WEB PLATFORM — Admin portal (Phase 3). All models below follow the newer
+// no-@@map convention (only the four oldest models keep @@map). Every model
+// carries createdAt/updatedAt; deletedAt is present only where a row represents
+// something that can be "removed" without losing history (e.g. CMS content),
+// and deliberately absent on append-only records (AuditLog, ModerationAction).
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Migration 1 — Identity / RBAC / Audit
+// ---------------------------------------------------------------------------
+
+/// Lifecycle of an admin account. `Invited` = created via an admin invite but
+/// the invitee hasn't set a password / accepted yet (passwordHash is null).
+/// `Suspended` = access revoked without deleting the row (audit history kept).
+enum AdminUserStatus {
+  Invited
+  Active
+  Suspended
+}
+
+/// Whether a per-admin permission override adds (GRANT) or removes (REVOKE) a
+/// permission relative to what the admin's Role grants. Exists because roles
+/// alone can't express "this one Support Agent also gets data-export".
+enum PermissionOverrideEffect {
+  GRANT
+  REVOKE
+}
+
+/// A staff member with access to the admin portal. Entirely separate from the
+/// end-user `User` table (different auth surface, own JWT secret/strategy).
+/// One Role per admin (FK below); finer-grained tweaks are expressed as
+/// AdminUserPermissionOverride rows layered on top of the role's permissions.
+model AdminUser {
+  id           String          @id @default(uuid())
+  email        String          @unique
+  /// bcrypt hash; null while status = Invited (set on invite-accept). Never the
+  /// raw password. Admin-specific 12+ char / 3-of-4-class policy enforced at the
+  /// service layer (closes security finding W6 for this surface).
+  passwordHash String?
+  displayName  String
+  status       AdminUserStatus @default(Invited)
+  roleId       String
+  role         Role            @relation(fields: [roleId], references: [id])
+
+  /// Forces a password change on first login — true for the bootstrap Owner and
+  /// for any invited admin until they set their own password.
+  mustChangePassword Boolean @default(true)
+
+  /// Base32 TOTP secret, set on MFA enrollment (TOTP + recovery codes only, no
+  /// SMS). `mfaEnabledAt` marks completed enrollment; MFA is mandatory for roles
+  /// whose `mfaRequired` is true (Owner/Super Admin).
+  mfaSecret    String?
+  mfaEnabledAt DateTime?
+
+  /// Durable lockout state (closes W4). `failedLoginCount` is the durable mirror
+  /// of the Redis fail-counter; `lockedUntil` is set once the threshold is hit.
+  failedLoginCount Int       @default(0)
+  lockedUntil      DateTime?
+  lastLoginAt      DateTime?
+
+  /// Invite chain (self-relation): who invited this admin, and whom they invited.
+  invitedByAdminId String?
+  invitedBy        AdminUser?  @relation("AdminInvites", fields: [invitedByAdminId], references: [id])
+  invitedAdmins    AdminUser[] @relation("AdminInvites")
+  invitedAt        DateTime?
+  inviteAcceptedAt DateTime?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  sessions            AdminSession[]
+  recoveryCodes       AdminMfaRecoveryCode[]
+  permissionOverrides AdminUserPermissionOverride[] @relation("OverrideTarget")
+  grantedOverrides    AdminUserPermissionOverride[] @relation("OverrideGrantedBy")
+  auditLogs           AuditLog[]
+
+  // CMS authoring stamps (added in migration 2).
+  createdPages         CmsPage[]         @relation("CmsPageCreatedBy")
+  updatedPages         CmsPage[]         @relation("CmsPageUpdatedBy")
+  createdSections      CmsSection[]      @relation("CmsSectionCreatedBy")
+  updatedSections      CmsSection[]      @relation("CmsSectionUpdatedBy")
+  createdFaqs          CmsFaq[]          @relation("CmsFaqCreatedBy")
+  updatedFaqs          CmsFaq[]          @relation("CmsFaqUpdatedBy")
+  createdTestimonials  CmsTestimonial[]  @relation("CmsTestimonialCreatedBy")
+  updatedTestimonials  CmsTestimonial[]  @relation("CmsTestimonialUpdatedBy")
+  createdScreenshots   CmsScreenshot[]   @relation("CmsScreenshotCreatedBy")
+  updatedScreenshots   CmsScreenshot[]   @relation("CmsScreenshotUpdatedBy")
+  createdAnnouncements CmsAnnouncement[] @relation("CmsAnnouncementCreatedBy")
+  updatedAnnouncements CmsAnnouncement[] @relation("CmsAnnouncementUpdatedBy")
+  createdLinks         CmsLink[]         @relation("CmsLinkCreatedBy")
+  updatedLinks         CmsLink[]         @relation("CmsLinkUpdatedBy")
+  createdConfigs       AppConfig[]       @relation("AppConfigCreatedBy")
+  updatedConfigs       AppConfig[]       @relation("AppConfigUpdatedBy")
+
+  // Notification campaigns (added in migration 2).
+  createdCampaigns NotificationCampaign[] @relation("CampaignCreatedBy")
+  updatedCampaigns NotificationCampaign[] @relation("CampaignUpdatedBy")
+
+  // Moderation + mission/completion authoring (added in migration 3).
+  reviewedReports     Report[]           @relation("ReportReviewedBy")
+  moderationActions   ModerationAction[] @relation("ModerationActionBy")
+  reviewedAppeals     Appeal[]           @relation("AppealReviewedBy")
+  createdMissions     Mission[]          @relation("MissionCreatedBy")
+  approvedMissions    Mission[]          @relation("MissionApprovedBy")
+  verifiedCompletions Completion[]       @relation("CompletionVerifiedBy")
+
+  @@index([roleId])
+  @@index([status])
+}
+
+/// A named bundle of permissions assignable to admins. System roles (Owner,
+/// Super Admin) are seeded with `isSystem = true` so they can't be renamed or
+/// deleted. `mfaRequired` is role-inheritable — an admin in an mfaRequired role
+/// must complete MFA before privileged access.
+model Role {
+  id          String    @id @default(uuid())
+  /// Stable machine key, e.g. "owner", "content_moderator". Used by the seed to
+  /// upsert idempotently and by code that references a role by identity.
+  key         String    @unique
+  name        String
+  description String?
+  isSystem    Boolean   @default(false)
+  mfaRequired Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  admins      AdminUser[]
+  permissions RolePermission[]
+
+  @@index([key])
+}
+
+/// A fixed, seeded catalog entry. Dot-namespaced key (e.g. "users.suspend"). No
+/// soft-delete: permissions are code-defined and referenced by key, never
+/// removed at runtime.
+model Permission {
+  id          String   @id @default(uuid())
+  key         String   @unique
+  description String
+  /// UI grouping label, e.g. "Users", "Challenges", "Content".
+  category    String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  roles     RolePermission[]
+  overrides AdminUserPermissionOverride[]
+}
+
+/// Join table: which permissions a role grants.
+model RolePermission {
+  id           String     @id @default(uuid())
+  roleId       String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permissionId String
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@unique([roleId, permissionId])
+  @@index([permissionId])
+}
+
+/// Per-admin override layered on top of the role's permissions. Effective
+/// permission set = (role's permissions ∪ GRANT overrides) − REVOKE overrides.
+/// At most one override per (admin, permission).
+model AdminUserPermissionOverride {
+  id               String                   @id @default(uuid())
+  adminUserId      String
+  adminUser        AdminUser                @relation("OverrideTarget", fields: [adminUserId], references: [id], onDelete: Cascade)
+  permissionId     String
+  permission       Permission               @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  effect           PermissionOverrideEffect
+  reason           String?
+  grantedByAdminId String?
+  grantedBy        AdminUser?               @relation("OverrideGrantedBy", fields: [grantedByAdminId], references: [id])
+  createdAt        DateTime                 @default(now())
+  updatedAt        DateTime                 @updatedAt
+
+  @@unique([adminUserId, permissionId])
+  @@index([adminUserId])
+  @@index([permissionId])
+}
+
+/// One row per MFA recovery code (not a flat array) so each code is individually
+/// consumable (`usedAt`) and replay-proof. Only the hash is stored, never the
+/// raw code.
+model AdminMfaRecoveryCode {
+  id          String    @id @default(uuid())
+  adminUserId String
+  adminUser   AdminUser  @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+  codeHash    String
+  usedAt      DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([adminUserId])
+}
+
+/// Multi-row-per-admin session (unlike User's single refreshTokenHash slot) —
+/// this is what makes real device/login history and forced-logout-all possible.
+/// A per-request check that the session isn't revoked/expired closes W2 for the
+/// admin surface. Only the refresh token hash is stored.
+model AdminSession {
+  id               String    @id @default(uuid())
+  adminUserId      String
+  adminUser        AdminUser  @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
+  refreshTokenHash String
+  userAgent        String?
+  ipAddress        String?
+  lastUsedAt       DateTime?
+  expiresAt        DateTime
+  /// Set on logout, forced logout-all, or admin suspension. Revocation is
+  /// tracked here rather than by deleting the row (keeps login history).
+  revokedAt        DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([adminUserId])
+  @@index([refreshTokenHash])
+}
+
+/// Append-only audit trail. Immutable by construction: no update/delete route is
+/// ever built for it, and it intentionally has neither `updatedAt` nor
+/// `deletedAt`. Polymorphic target (`targetType`/`targetId`) and JSON
+/// before/after snapshots capture any admin action. `adminUserId` is nullable
+/// for system-originated events.
+model AuditLog {
+  id            String     @id @default(uuid())
+  adminUserId   String?
+  adminUser     AdminUser? @relation(fields: [adminUserId], references: [id])
+  /// Dot-namespaced action key, e.g. "users.suspend", mirroring permission keys.
+  action        String
+  targetType    String?
+  targetId      String?
+  previousValue Json?
+  newValue      Json?
+  ipAddress     String?
+  userAgent     String?
+  createdAt     DateTime   @default(now())
+
+  @@index([adminUserId])
+  @@index([targetType, targetId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Migration 2 — CMS + Notification campaigns
+// ---------------------------------------------------------------------------
+
+/// Publishing lifecycle shared by all CMS content. `Draft` is invisible to the
+/// public site; `Published` is served; `Archived` is retired but retained.
+enum CmsContentStatus {
+  Draft
+  Published
+  Archived
+}
+
+/// Discriminator for CmsAnnouncement so blog posts, product announcements, and
+/// safety notices share one table (per the plan's "kind discriminator").
+enum CmsAnnouncementKind {
+  Blog
+  Announcement
+  SafetyNotice
+}
+
+/// Typed homepage/feature section slots. The `data` payload is validated
+/// per-type server-side (structured JSON, never freeform HTML) to avoid
+/// arbitrary-markup stored XSS.
+enum CmsSectionType {
+  Hero
+  Feature
+  HowItWorks
+  Stats
+  Testimonials
+  Faq
+  Cta
+  Custom
+}
+
+/// Where a managed nav/footer link renders.
+enum CmsLinkPlacement {
+  Nav
+  Footer
+  Social
+  Legal
+}
+
+/// A public content page (About / Legal / Help / Contact / Safety). `body` is
+/// structured JSON validated server-side, not freeform HTML.
+model CmsPage {
+  id              String           @id @default(uuid())
+  slug            String           @unique
+  title           String
+  body            Json
+  metaTitle       String?
+  metaDescription String?
+  status          CmsContentStatus @default(Draft)
+  publishedAt     DateTime?
+
+  createdByAdminId String?
+  createdBy        AdminUser? @relation("CmsPageCreatedBy", fields: [createdByAdminId], references: [id])
+  updatedByAdminId String?
+  updatedBy        AdminUser? @relation("CmsPageUpdatedBy", fields: [updatedByAdminId], references: [id])
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([status])
+}
+
+/// A typed, ordered homepage/feature section. `key` is a stable slot id
+/// (e.g. "home.hero"); `data` is validated against `type`.
+model CmsSection {
+  id          String           @id @default(uuid())
+  key         String           @unique
+  type        CmsSectionType
+  title       String?
+  data        Json
+  sortOrder   Int              @default(0)
+  status      CmsContentStatus @default(Draft)
+  publishedAt DateTime?
+
+  createdByAdminId String?
+  createdBy        AdminUser? @relation("CmsSectionCreatedBy", fields: [createdByAdminId], references: [id])
+  updatedByAdminId String?
+  updatedBy        AdminUser? @relation("CmsSectionUpdatedBy", fields: [updatedByAdminId], references: [id])
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([type])
+  @@index([status])
+}
+
+model CmsFaq {
+  id          String           @id @default(uuid())
+  question    String
+  answer      String
+  category    String?
+  sortOrder   Int              @default(0)
+  status      CmsContentStatus @default(Draft)
+  publishedAt DateTime?
+
+  createdByAdminId String?
+  createdBy        AdminUser? @relation("CmsFaqCreatedBy", fields: [createdByAdminId], references: [id])
+  updatedByAdminId String?
+  updatedBy        AdminUser? @relation("CmsFaqUpdatedBy", fields: [updatedByAdminId], references: [id])
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([status])
+}
+
+model CmsTestimonial {
+  id          String           @id @default(uuid())
+  authorName  String
+  authorTitle String?
+  quote       String
+  /// S3 object key (resolved to a presigned GET at read time, same convention
+  /// as other media keys in this schema).
+  avatarKey   String?
+  rating      Int?
+  sortOrder   Int              @default(0)
+  status      CmsContentStatus @default(Draft)
+  publishedAt DateTime?
+
+  createdByAdminId String?
+  createdBy        AdminUser? @relation("CmsTestimonialCreatedBy", fields: [createdByAdminId], references: [id])
+  updatedByAdminId String?
+  updatedBy        AdminUser? @relation("CmsTestimonialUpdatedBy", fields: [updatedByAdminId], references: [id])
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([status])
+}
+
+model CmsScreenshot {
+  id          String           @id @default(uuid())
+  title       String?
+  caption     String?
+  /// S3 object key for the screenshot image.
+  imageKey    String
+  sortOrder   Int              @default(0)
+  status      CmsContentStatus @default(Draft)
+  publishedAt DateTime?
+
+  createdByAdminId String?
+  createdBy        AdminUser? @relation("CmsScreenshotCreatedBy", fields: [createdByAdminId], references: [id])
+  updatedByAdminId String?
+  updatedBy        AdminUser? @relation("CmsScreenshotUpdatedBy", fields: [updatedByAdminId], references: [id])
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([status])
+}
+
+/// Blog post / product announcement / safety notice, discriminated by `kind`.
+model CmsAnnouncement {
+  id            String              @id @default(uuid())
+  kind          CmsAnnouncementKind
+  slug          String              @unique
+  title         String
+  excerpt       String?
+  body          Json
+  /// S3 object key for the cover image.
+  coverImageKey String?
+  status        CmsContentStatus    @default(Draft)
+  publishedAt   DateTime?
+
+  createdByAdminId String?
+  createdBy        AdminUser? @relation("CmsAnnouncementCreatedBy", fields: [createdByAdminId], references: [id])
+  updatedByAdminId String?
+  updatedBy        AdminUser? @relation("CmsAnnouncementUpdatedBy", fields: [updatedByAdminId], references: [id])
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([kind])
+  @@index([status])
+  @@index([publishedAt])
+}
+
+/// Managed nav/footer/social/legal link.
+model CmsLink {
+  id           String           @id @default(uuid())
+  placement    CmsLinkPlacement
+  label        String
+  url          String
+  sortOrder    Int              @default(0)
+  openInNewTab Boolean          @default(false)
+  status       CmsContentStatus @default(Draft)
+
+  createdByAdminId String?
+  createdBy        AdminUser? @relation("CmsLinkCreatedBy", fields: [createdByAdminId], references: [id])
+  updatedByAdminId String?
+  updatedBy        AdminUser? @relation("CmsLinkUpdatedBy", fields: [updatedByAdminId], references: [id])
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([placement])
+  @@index([status])
+}
+
+/// Singleton-style key/value config store for ops-tweakable values (store URLs,
+/// contact info, feature flags) — avoids a one-off model per tweakable value.
+/// `value` is JSON so it can hold scalars, objects, or arrays.
+model AppConfig {
+  id          String  @id @default(uuid())
+  key         String  @unique
+  value       Json
+  description String?
+
+  createdByAdminId String?
+  createdBy        AdminUser? @relation("AppConfigCreatedBy", fields: [createdByAdminId], references: [id])
+  updatedByAdminId String?
+  updatedBy        AdminUser? @relation("AppConfigUpdatedBy", fields: [updatedByAdminId], references: [id])
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+}
+
+/// Delivery lifecycle of a marketing/announcement broadcast.
+enum NotificationCampaignStatus {
+  Draft
+  Scheduled
+  Sending
+  Sent
+  Cancelled
+  Failed
+}
+
+/// Per-recipient delivery outcome within a campaign fan-out. `Skipped` covers
+/// recipients filtered out at send time (e.g. marketingEnabled = false).
+enum CampaignRecipientStatus {
+  Pending
+  Sent
+  Failed
+  Skipped
+}
+
+/// An admin-authored broadcast. Resolved to concrete recipients at send time
+/// (via `targetFilter`), fanned out through the notifications BullMQ queue.
+/// The denormalized counters are a fast read; the recipient rows are the source
+/// of truth for delivery stats.
+model NotificationCampaign {
+  id       String @id @default(uuid())
+  /// Internal name for the admin list view.
+  title    String
+  /// Notification title/body actually shown to recipients.
+  headline String
+  body     String
+  /// Optional deep-link payload copied onto each recipient's Notification.
+  data     Json?
+  /// Structured targeting criteria, resolved to a recipient set at send time.
+  targetFilter Json?
+
+  status      NotificationCampaignStatus @default(Draft)
+  scheduledAt DateTime?
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  totalRecipients Int @default(0)
+  sentCount       Int @default(0)
+  failedCount     Int @default(0)
+
+  createdByAdminId String?
+  createdBy        AdminUser? @relation("CampaignCreatedBy", fields: [createdByAdminId], references: [id])
+  updatedByAdminId String?
+  updatedBy        AdminUser? @relation("CampaignUpdatedBy", fields: [updatedByAdminId], references: [id])
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  recipients NotificationCampaignRecipient[]
+
+  @@index([status])
+  @@index([scheduledAt])
+}
+
+/// Fan-out/delivery-stats row: one per (campaign, user).
+model NotificationCampaignRecipient {
+  id         String               @id @default(uuid())
+  campaignId String
+  campaign   NotificationCampaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User                  @relation(fields: [userId], references: [id])
+  /// The in-app Notification row created for this recipient, if one was written.
+  /// onDelete: SetNull so the delivery-stats row survives if the Notification is
+  /// ever removed — the recipient's send outcome is still meaningful without it.
+  notificationId String?
+  notification   Notification? @relation(fields: [notificationId], references: [id], onDelete: SetNull)
+  status         CampaignRecipientStatus @default(Pending)
+  failureReason  String?
+  sentAt         DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([campaignId, userId])
+  @@index([campaignId])
+  @@index([userId])
+  @@index([status])
+}
+
+// ---------------------------------------------------------------------------
+// Migration 3 — Moderation + Mission/Completion admin extensions
+// ---------------------------------------------------------------------------
+
+/// What a Report or ModerationAction points at. Polymorphic (`targetType` +
+/// `targetId`) so the moderation queue can unify Completion and
+/// UserTaskSubmission review, plus user- and mission-level reports.
+enum ModerationTargetType {
+  Completion
+  UserTaskSubmission
+  User
+  Mission
+}
+
+/// Triage lifecycle of a user/system report.
+enum ReportStatus {
+  Open
+  UnderReview
+  Resolved
+  Dismissed
+}
+
+/// The action a moderator took. Repeat-offender history is a query over these
+/// rows (by `targetUserId`), not a stored counter.
+enum ModerationActionType {
+  Dismiss
+  HideContent
+  RemoveContent
+  WarnUser
+  SuspendUser
+  BanUser
+  ReinstateContent
+  ReinstateUser
+}
+
+/// Outcome of an appeal against a ModerationAction.
+enum AppealStatus {
+  Pending
+  Upheld
+  Denied
+}
+
+/// A report filed against content or a user. `reporterUserId` is nullable to
+/// allow system-generated or post-anonymization reports. Target is polymorphic.
+model Report {
+  id             String               @id @default(uuid())
+  reporterUserId String?
+  reporter       User?                @relation("ReportReporter", fields: [reporterUserId], references: [id])
+  targetType     ModerationTargetType
+  targetId       String
+  reason         String
+  details        String?
+  status         ReportStatus         @default(Open)
+
+  reviewedByAdminId String?
+  reviewedBy        AdminUser? @relation("ReportReviewedBy", fields: [reviewedByAdminId], references: [id])
+  reviewedAt        DateTime?
+  resolutionNote    String?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  actions ModerationAction[]
+
+  @@index([targetType, targetId])
+  @@index([status])
+  @@index([reporterUserId])
+}
+
+/// A moderation decision, optionally linked to the Report that prompted it.
+/// Append-only historical record (no soft-delete); a reversal is captured by
+/// `reversedAt` rather than by mutating/deleting the row. `targetUserId` is a
+/// real FK when the action is against a user (suspend/ban/warn), enabling the
+/// repeat-offender query.
+model ModerationAction {
+  id          String               @id @default(uuid())
+  reportId    String?
+  report      Report?              @relation(fields: [reportId], references: [id])
+  adminUserId String
+  admin       AdminUser            @relation("ModerationActionBy", fields: [adminUserId], references: [id])
+  actionType  ModerationActionType
+  targetType  ModerationTargetType
+  targetId    String
+  targetUserId String?
+  targetUser   User?    @relation("ModerationTargetUser", fields: [targetUserId], references: [id])
+  reason      String
+  /// For time-boxed suspensions; null for permanent or non-user actions.
+  expiresAt   DateTime?
+  reversedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  appeals Appeal[]
+
+  @@index([reportId])
+  @@index([adminUserId])
+  @@index([targetType, targetId])
+  @@index([targetUserId])
+}
+
+/// A user's appeal against a ModerationAction taken on them. Intentionally
+/// append-only (no `deletedAt`), same as ModerationAction: an appeal is part of
+/// the permanent moderation-decision trail — its lifecycle is captured by
+/// `status` (Pending -> Upheld/Denied), and there is no legitimate "remove" that
+/// should erase the record that an appeal was made and decided.
+model Appeal {
+  id                 String           @id @default(uuid())
+  moderationActionId String
+  moderationAction   ModerationAction @relation(fields: [moderationActionId], references: [id])
+  appellantUserId    String
+  appellant          User             @relation("AppealAppellant", fields: [appellantUserId], references: [id])
+  reason             String
+  status             AppealStatus     @default(Pending)
+
+  reviewedByAdminId String?
+  reviewedBy        AdminUser? @relation("AppealReviewedBy", fields: [reviewedByAdminId], references: [id])
+  reviewedAt        DateTime?
+  decisionNote      String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([moderationActionId])
+  @@index([appellantUserId])
+  @@index([status])
 }

@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { Mission, MissionCategory, MissionDifficulty } from '@prisma/client';
+import { Mission, MissionCategory, MissionDifficulty, MissionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { MissionPoolService } from './mission-pool.service';
@@ -20,6 +20,18 @@ function makeMission(overrides: Partial<Mission> = {}): Mission {
     settingTags: ['Outdoors'],
     costTier: 0,
     isActive: true,
+    status: MissionStatus.Published,
+    approvedAt: null,
+    approvedByAdminId: null,
+    featured: false,
+    sponsorName: null,
+    startDate: null,
+    endDate: null,
+    participantLimit: null,
+    milestones: null,
+    safetyNotice: null,
+    iconKey: null,
+    createdByAdminId: null,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
     deletedAt: null,
