@@ -3,7 +3,7 @@ import { sanitizeSvg, sanitizeSvgBuffer } from './svg-sanitizer';
 /** Matches a `<script>` or namespace-prefixed `<x:script>` opening tag. */
 const SCRIPT_TAG = /<[a-z0-9]*:?script[\s>/]/i;
 
-describe('sanitizeSvg (DOMPurify-backed)', () => {
+describe('sanitizeSvg (htmlparser2-backed parse-and-rebuild)', () => {
   it('strips an embedded <script> element (keeps benign siblings)', () => {
     const out = sanitizeSvg(
       '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(document.cookie)</script><rect/></svg>',
