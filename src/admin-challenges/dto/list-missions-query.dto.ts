@@ -1,7 +1,19 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { MissionCategory, MissionDifficulty, MissionStatus } from '@prisma/client';
 import { Transform, Type } from 'class-transformer';
-import { IsBoolean, IsEnum, IsInt, IsOptional, Max, Min } from 'class-validator';
+import { IsBoolean, IsEnum, IsIn, IsInt, IsOptional, Max, Min } from 'class-validator';
+
+/**
+ * The mission statuses an admin can filter the list by. Excludes
+ * `PendingApproval`, which is a reserved-but-unimplemented enum value (no code
+ * path ever sets it — see the schema comment on `MissionStatus`); allowing it as
+ * a filter would only ever return an empty page and mislead the caller.
+ */
+export const FILTERABLE_MISSION_STATUSES = [
+  MissionStatus.Draft,
+  MissionStatus.Published,
+  MissionStatus.Archived,
+] as const;
 
 /**
  * Coerces the common truthy/falsy query-string encodings into a real boolean so
@@ -37,10 +49,13 @@ export class ListMissionsQueryDto {
   @Max(100)
   pageSize?: number = 25;
 
-  @ApiPropertyOptional({ enum: MissionStatus, description: 'Filter by lifecycle status' })
+  @ApiPropertyOptional({
+    enum: FILTERABLE_MISSION_STATUSES,
+    description: 'Filter by lifecycle status (PendingApproval is reserved and not filterable)',
+  })
   @IsOptional()
-  @IsEnum(MissionStatus)
-  status?: MissionStatus;
+  @IsIn(FILTERABLE_MISSION_STATUSES)
+  status?: (typeof FILTERABLE_MISSION_STATUSES)[number];
 
   @ApiPropertyOptional({ enum: MissionCategory, description: 'Filter by category' })
   @IsOptional()
