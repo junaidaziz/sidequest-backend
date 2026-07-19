@@ -47,6 +47,20 @@ model User {
   updatedAt    DateTime  @updatedAt
   deletedAt    DateTime?
 
+  /// Admin moderation (Phase 8, web platform). `suspendedAt` is set when an
+  /// admin suspends this account and cleared on reactivate; a non-null value
+  /// blocks all authenticated access at JwtStrategy (rejected on the very next
+  /// request), the same immediacy guarantee `deletedAt` already provides.
+  /// `suspensionReason` records the required operator reason. `restrictedFeatures`
+  /// is a minimal allow-list of known feature keys (see RestrictableFeature in the
+  /// admin module) an admin can toggle per user — deliberately a String[] rather
+  /// than a second permission system, since the spec asks only for a simple
+  /// per-user restriction toggle. Additive: no existing User field is touched.
+  suspendedAt        DateTime?
+  suspensionReason   String?
+  suspendedByAdminId String?
+  restrictedFeatures String[]  @default([])
+
   completions  Completion[]
   savedMissions SavedMission[]
 
@@ -84,6 +98,12 @@ model User {
   moderationActionsAgainst ModerationAction[] @relation("ModerationTargetUser")
   appeals                  Appeal[]           @relation("AppealAppellant")
 
+  /// Admin who suspended this account (Phase 8). Nullable FK, SetNull on the
+  /// admin's deletion so an ex-admin's removal never blocks reading which account
+  /// is suspended — the suspension itself lives in the `suspendedAt` flag.
+  suspendedByAdmin         AdminUser?         @relation("UserSuspendedBy", fields: [suspendedByAdminId], references: [id])
+
+  @@index([suspendedAt])
   @@map("users")
 }
 
@@ -663,6 +683,9 @@ model AdminUser {
   createdMissions     Mission[]          @relation("MissionCreatedBy")
   approvedMissions    Mission[]          @relation("MissionApprovedBy")
   verifiedCompletions Completion[]       @relation("CompletionVerifiedBy")
+
+  // End-user account suspension (Phase 8, web platform).
+  suspendedUsers      User[]             @relation("UserSuspendedBy")
 
   @@index([roleId])
   @@index([status])
