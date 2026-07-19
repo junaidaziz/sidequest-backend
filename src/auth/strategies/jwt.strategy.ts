@@ -19,6 +19,10 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
       ignoreExpiration: false,
       secretOrKey: config.getOrThrow<string>('JWT_SECRET'),
+      // Pin the accepted signing algorithm (closes security finding W5 — JWT
+      // algorithm not pinned). Without this a token forged with `alg: none` or a
+      // downgraded algorithm could be accepted. HS256 is what AuthService signs with.
+      algorithms: ['HS256'],
     });
   }
 

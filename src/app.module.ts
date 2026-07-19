@@ -22,6 +22,10 @@ import { IdempotencyModule } from './idempotency/idempotency.module';
 import { TasksModule } from './tasks/tasks.module';
 import { ReferralsModule } from './referrals/referrals.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { EmailModule } from './email/email.module';
+import { AuditLogModule } from './audit-log/audit-log.module';
+import { AdminAuthModule } from './admin-auth/admin-auth.module';
+import { RbacModule } from './rbac/rbac.module';
 
 /**
  * `Number(...)` of a non-numeric env value silently produces NaN, which would
@@ -99,6 +103,12 @@ function bullConnectionFromRedisUrl(redisUrl: string): {
     TasksModule,
     ReferralsModule,
     NotificationsModule,
+    // Phase 4 — admin platform infrastructure (additive; the existing
+    // AdminGuard/x-admin-key route is untouched until its Phase-10 cutover).
+    EmailModule,
+    AuditLogModule,
+    AdminAuthModule,
+    RbacModule,
   ],
   controllers: [AppController],
   providers: [
