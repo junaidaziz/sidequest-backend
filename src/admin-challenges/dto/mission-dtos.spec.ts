@@ -134,4 +134,15 @@ describe('ListMissionsQueryDto', () => {
     const dto = build(ListMissionsQueryDto, { status: 'Nope' });
     expect(validateSync(dto).some((e) => e.property === 'status')).toBe(true);
   });
+
+  it('accepts the three real filterable statuses', () => {
+    for (const status of ['Draft', 'Published', 'Archived']) {
+      expect(validateSync(build(ListMissionsQueryDto, { status }))).toHaveLength(0);
+    }
+  });
+
+  it('rejects the reserved PendingApproval status as a filter', () => {
+    const dto = build(ListMissionsQueryDto, { status: 'PendingApproval' });
+    expect(validateSync(dto).some((e) => e.property === 'status')).toBe(true);
+  });
 });
