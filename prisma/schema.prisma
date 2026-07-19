@@ -125,6 +125,12 @@ enum MissionDifficulty {
 /// workflow. Existing seeded missions are backfilled as `Published`.
 enum MissionStatus {
   Draft
+  /// RESERVED — no code path sets or reads `PendingApproval`. Missions are
+  /// authored in-house and have no user-submission queue, so the Phase 9 admin
+  /// workflow goes Draft -> Published directly (publish IS the approval step).
+  /// Kept for a possible future submission/approval flow; until one exists it is
+  /// deliberately excluded from the admin list-status filter (see
+  /// list-missions-query.dto.ts) so callers can't query for an always-empty set.
   PendingApproval
   Published
   Archived
