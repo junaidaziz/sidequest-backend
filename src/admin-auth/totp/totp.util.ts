@@ -57,6 +57,17 @@ export function verifyTotp(secret: string, token: string, window = 1, atSeconds?
   return false;
 }
 
+/**
+ * Generates the current 6-digit TOTP code for a secret. Primarily a test/helper
+ * utility (the server verifies codes, it never issues them to users), but exposed
+ * so callers and tests can produce a valid code deterministically via `atSeconds`.
+ */
+export function generateTotp(secret: string, atSeconds?: number): string {
+  const key = base32Decode(secret);
+  const nowSeconds = atSeconds ?? Math.floor(Date.now() / 1000);
+  return hotp(key, Math.floor(nowSeconds / STEP_SECONDS));
+}
+
 /** RFC 4226 HOTP for a single counter value, returned as a zero-padded 6-digit string. */
 function hotp(key: Buffer, counter: number): string {
   const counterBuf = Buffer.alloc(8);
