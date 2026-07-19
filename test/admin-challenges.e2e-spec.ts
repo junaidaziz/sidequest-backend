@@ -43,7 +43,12 @@ describe('Admin challenge management (e2e)', () => {
   let editorToken: string;
   let viewerToken: string;
 
-  const GENERATE_CONTEXT = { crew: 'Kids Mode', time: '15 min', setting: 'Indoors', budget: 'Free' };
+  const GENERATE_CONTEXT = {
+    crew: 'Kids Mode',
+    time: '15 min',
+    setting: 'Indoors',
+    budget: 'Free',
+  };
 
   function missionBody(title: string): Record<string, unknown> {
     return {
