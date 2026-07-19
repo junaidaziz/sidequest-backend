@@ -10,7 +10,10 @@ import { IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
  * any field other than `reason`).
  */
 export class MissionActionDto {
-  @ApiPropertyOptional({ description: 'Optional operator note recorded in the audit log', maxLength: 500 })
+  @ApiPropertyOptional({
+    description: 'Optional operator note recorded in the audit log',
+    maxLength: 500,
+  })
   @IsOptional()
   @IsString()
   @MinLength(1)
