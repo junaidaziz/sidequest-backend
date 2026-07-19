@@ -22,7 +22,6 @@ import { RequirePermission } from '../rbac/decorators/require-permission.decorat
 import { PermissionGuard } from '../rbac/guards/permission.guard';
 import { AdminUserActionContext, AdminUsersService } from './admin-users.service';
 import {
-  AdminActionResponseDto,
   AdminUserDetailDto,
   AdminUserExportDto,
   AdminUserPageDto,
@@ -151,10 +150,11 @@ export class AdminUsersController {
   }
 
   @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
   @RequirePermission('users.delete')
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiOperation({ summary: 'Process an account-deletion request (soft-delete + anonymize)' })
-  @ApiResponse({ status: 200, type: AdminActionResponseDto })
+  @ApiResponse({ status: 204, description: 'Deletion processed' })
   @ApiResponse({ status: 400, description: 'confirm must be true' })
   @ApiResponse({ status: 404, description: 'User not found or already deleted' })
   async deleteUser(
@@ -163,9 +163,8 @@ export class AdminUsersController {
     @Body() dto: DeleteUserDto,
     @Ip() ip: string,
     @Headers('user-agent') ua?: string,
-  ): Promise<AdminActionResponseDto> {
+  ): Promise<void> {
     await this.service.deleteUser(id, dto.reason, this.ctx(actor, ip, ua));
-    return { success: true };
   }
 
   /** Assembles the per-request audit context from the authenticated admin + request. */
