@@ -120,7 +120,10 @@ export class AdminChallengesService {
    * is invisible to the generator until an explicit publish. Title collisions
    * (the `Mission.title` unique constraint) surface as a 409.
    */
-  async create(dto: CreateMissionDto, ctx: AdminMissionActionContext): Promise<AdminMissionDetailDto> {
+  async create(
+    dto: CreateMissionDto,
+    ctx: AdminMissionActionContext,
+  ): Promise<AdminMissionDetailDto> {
     this.assertDateWindow(dto.startDate, dto.endDate);
 
     const mission = await this.runUniqueTitle(() =>
@@ -519,7 +522,9 @@ export class AdminChallengesService {
   }
 
   /** Deep-clones a Prisma JSON value for the duplicate flow (null-safe). */
-  private cloneJson(value: Prisma.JsonValue | null): Prisma.InputJsonValue | typeof Prisma.JsonNull {
+  private cloneJson(
+    value: Prisma.JsonValue | null,
+  ): Prisma.InputJsonValue | typeof Prisma.JsonNull {
     if (value === null || value === undefined) return Prisma.JsonNull;
     return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
   }
