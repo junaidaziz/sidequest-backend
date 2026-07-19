@@ -90,13 +90,17 @@ describe('MissionActionDto', () => {
   });
 
   it('rejects an over-long reason', () => {
-    expect(validateSync(build(MissionActionDto, { reason: 'x'.repeat(501) })).length).toBeGreaterThan(0);
+    expect(
+      validateSync(build(MissionActionDto, { reason: 'x'.repeat(501) })).length,
+    ).toBeGreaterThan(0);
   });
 });
 
 describe('MissionMilestoneDto', () => {
   it('requires a title', () => {
-    expect(validateSync(build(MissionMilestoneDto, { description: 'x' })).length).toBeGreaterThan(0);
+    expect(validateSync(build(MissionMilestoneDto, { description: 'x' })).length).toBeGreaterThan(
+      0,
+    );
   });
 });
 
