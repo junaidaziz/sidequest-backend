@@ -302,7 +302,10 @@ export class AuthService {
     const user = await this.prisma.user.findUnique({
       where: { email: dto.email },
     });
-    if (!user || !user.passwordHash || user.deletedAt) {
+    // A suspended account (Phase 8) is treated exactly like a deleted/unknown one
+    // on the login path: no fresh token pair is issued, and the same generic,
+    // enumeration-resistant error is returned so suspension status doesn't leak.
+    if (!user || !user.passwordHash || user.deletedAt || user.suspendedAt) {
       // Same-cost dummy compare so a missing/passwordless account takes the
       // same wall-clock time as a real one — see DUMMY_BCRYPT_HASH comment.
       await bcrypt.compare(dto.password, DUMMY_BCRYPT_HASH);
@@ -336,7 +339,11 @@ export class AuthService {
     const user = await this.prisma.user.findUnique({
       where: { id: payload.sub },
     });
-    if (!user || !user.refreshTokenHash || user.deletedAt) {
+    // A suspended account (Phase 8) cannot rotate into a fresh access token. The
+    // suspend action nulls `refreshTokenHash` too, so the `!user.refreshTokenHash`
+    // clause already covers the common case; the explicit `suspendedAt` check is
+    // belt-and-suspenders against any token minted before the hash was cleared.
+    if (!user || !user.refreshTokenHash || user.deletedAt || user.suspendedAt) {
       throw new UnauthorizedException(INVALID_REFRESH_ERROR);
     }
 
@@ -500,10 +507,27 @@ export class AuthService {
       );
     }
 
+    await this.anonymizeUserAccount(userId, user.avatarUrl);
+    return { success: true };
+  }
+
+  /**
+   * The reusable core of account deletion (Phase 8): soft-delete + anonymize +
+   * de-reference media, then best-effort S3/push cleanup. Extracted from
+   * `deleteAccount` so an admin-initiated deletion request (`DELETE
+   * /admin/users/:id`) applies the *exact same* anonymization as the self-service
+   * flow rather than duplicating it — the only difference between the two is the
+   * caller-side gate (self-service re-auths the user; the admin path is
+   * permission-gated + audited). Caller is responsible for confirming the row
+   * exists and is not already deleted before invoking this.
+   *
+   * `avatarKey` is passed in (rather than re-read) so this method makes no extra
+   * `user.findUnique` round trip — the caller already has the row in hand.
+   */
+  async anonymizeUserAccount(userId: string, avatarKey: string | null): Promise<void> {
     // Soft-delete + anonymize + de-reference media pointers atomically. Media
     // keys are collected before nulling so the S3 objects can be cleaned up
     // after the commit.
-    const avatarKey = user.avatarUrl;
     const mediaKeys = await this.prisma.$transaction(async (tx) => {
       const [completions, attachments] = await Promise.all([
         tx.completion.findMany({
@@ -575,8 +599,6 @@ export class AuthService {
         error instanceof Error ? error.stack : undefined,
       );
     }
-
-    return { success: true };
   }
 
   /**
