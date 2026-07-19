@@ -297,8 +297,15 @@ const PERMISSIONS: PermissionSeed[] = [
   { key: 'challenges.create', category: 'Challenges', description: 'Create challenges' },
   { key: 'challenges.edit', category: 'Challenges', description: 'Edit challenges' },
   { key: 'challenges.delete', category: 'Challenges', description: 'Delete challenges' },
-  { key: 'challenges.publish', category: 'Challenges', description: 'Publish or archive challenges' },
-  { key: 'challenges.approve', category: 'Challenges', description: 'Approve challenges pending review' },
+  // `challenges.publish` also covers the "approve" action: missions are authored
+  // in-house and have no separate user-submission queue, so publish IS the approval
+  // step. A distinct `challenges.approve` key was removed (Phase 9) as it gated no
+  // route and would have misled the frontend into wiring against a no-op permission.
+  {
+    key: 'challenges.publish',
+    category: 'Challenges',
+    description: 'Publish, unpublish, approve, or archive challenges',
+  },
   { key: 'challenges.feature', category: 'Challenges', description: 'Feature or unfeature challenges' },
   // Moderation
   { key: 'moderation.view_queue', category: 'Moderation', description: 'View the moderation queue' },
@@ -387,7 +394,6 @@ const ROLES: RoleSeed[] = [
       'challenges.edit',
       'challenges.delete',
       'challenges.publish',
-      'challenges.approve',
       'challenges.feature',
       'proofs.view',
       'proofs.review',
@@ -447,8 +453,25 @@ const ROLES: RoleSeed[] = [
   },
 ];
 
+/**
+ * Permission keys that existed in a prior catalog and have since been retired.
+ * Deleting the Permission row cascades to its RolePermission and
+ * AdminUserPermissionOverride rows (`onDelete: Cascade`), so this keeps an
+ * already-seeded DB in lock-step with the current catalog rather than leaving a
+ * dangling permission that gates nothing. `challenges.approve` was removed in
+ * Phase 9 — missions have no separate submission queue, so `challenges.publish`
+ * is the approval action and `challenges.approve` gated no route.
+ */
+const RETIRED_PERMISSION_KEYS = ['challenges.approve'];
+
 async function seedPermissions(): Promise<Map<string, string>> {
   const keyToId = new Map<string, string>();
+  const pruned = await prisma.permission.deleteMany({
+    where: { key: { in: RETIRED_PERMISSION_KEYS } },
+  });
+  if (pruned.count > 0) {
+    console.log(`Pruned ${pruned.count} retired permission(s): ${RETIRED_PERMISSION_KEYS.join(', ')}`);
+  }
   for (const permission of PERMISSIONS) {
     const row = await prisma.permission.upsert({
       where: { key: permission.key },
