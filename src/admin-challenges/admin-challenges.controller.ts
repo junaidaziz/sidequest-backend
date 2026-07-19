@@ -14,7 +14,15 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBearerAuth,
+  ApiForbiddenResponse,
+  ApiOperation,
+  ApiParam,
+  ApiResponse,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 import { CurrentAdmin } from '../admin-auth/decorators/current-admin.decorator';
 import { AdminJwtAuthGuard } from '../admin-auth/guards/admin-jwt-auth.guard';
 import { AuthAdmin } from '../admin-auth/types/admin-jwt-payload.interface';
@@ -36,6 +44,11 @@ import { UpdateMissionDto } from './dto/update-mission.dto';
  */
 @ApiTags('admin-missions')
 @ApiBearerAuth()
+// Every route below is behind AdminJwtAuthGuard + PermissionGuard, so 401 (no/invalid
+// admin token) and 403 (missing the route's required permission) apply uniformly.
+// Declared once at the class level — NestJS Swagger merges these into every operation.
+@ApiUnauthorizedResponse({ description: 'Missing or invalid admin access token' })
+@ApiForbiddenResponse({ description: 'Missing the required challenges.* permission' })
 @UseGuards(AdminJwtAuthGuard, PermissionGuard)
 @Controller('admin/missions')
 export class AdminChallengesController {
@@ -45,7 +58,6 @@ export class AdminChallengesController {
   @RequirePermission('challenges.view')
   @ApiOperation({ summary: 'Search / filter / paginate the curated mission pool' })
   @ApiResponse({ status: 200, type: AdminMissionPageDto })
-  @ApiResponse({ status: 403, description: 'Missing challenges.view permission' })
   list(@Query() query: ListMissionsQueryDto): Promise<AdminMissionPageDto> {
     return this.service.list(query);
   }
