@@ -30,6 +30,7 @@ import { CmsModule } from './cms/cms.module';
 import { AppConfigModule } from './app-config/app-config.module';
 import { AdminChallengesModule } from './admin-challenges/admin-challenges.module';
 import { ModerationModule } from './moderation/moderation.module';
+import { NotificationCampaignsModule } from './notification-campaigns/notification-campaigns.module';
 
 /**
  * `Number(...)` of a non-numeric env value silently produces NaN, which would
@@ -121,6 +122,10 @@ function bullConnectionFromRedisUrl(redisUrl: string): {
     // the RBAC-gated proof-review route. The legacy AdminGuard/x-admin-key
     // completion-verification route was removed in this phase's cutover.
     ModerationModule,
+    // Phase 11 — admin notification campaigns: CRUD + audience preview +
+    // send/schedule/cancel, fanned out via the app's third BullMQ queue
+    // (`campaigns`), reusing NotificationsService.notify() per recipient.
+    NotificationCampaignsModule,
   ],
   controllers: [AppController],
   providers: [
