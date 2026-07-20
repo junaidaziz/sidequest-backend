@@ -463,8 +463,24 @@ export class AnalyticsService {
     };
   }
 
+  /**
+   * Cache-key-only rounding (backend-eval WARN, Phase 12 review): an unparameterized
+   * request defaults `to` to `new Date()`, which is millisecond-precise — every
+   * such request built a distinct key, so the cache never actually hit for the most
+   * common load (an admin opening the dashboard with no date params), even though
+   * two requests a few seconds apart should reuse the same computed block. Rounding
+   * down to the current minute here does NOT touch `range` itself — queries still
+   * run against the precise bounds; only the string used to address the cache entry
+   * is coarsened, so results are unaffected and near-simultaneous requests now share
+   * a cache hit.
+   */
   private cacheKey(range: ResolvedRange): string {
-    return `${ANALYTICS_CACHE_KEY_PREFIX}:${range.from.toISOString()}:${range.to.toISOString()}`;
+    return `${ANALYTICS_CACHE_KEY_PREFIX}:${this.roundToMinute(range.from)}:${this.roundToMinute(range.to)}`;
+  }
+
+  private roundToMinute(date: Date): string {
+    const MS_PER_MINUTE = 60_000;
+    return new Date(Math.floor(date.getTime() / MS_PER_MINUTE) * MS_PER_MINUTE).toISOString();
   }
 
   private async readCache(key: string): Promise<AnalyticsKpiBlock | null> {
