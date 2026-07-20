@@ -47,6 +47,13 @@ describe('AdminManagementService', () => {
     adminUser: { findMany: jest.Mock; findFirst: jest.Mock; create: jest.Mock; update: jest.Mock };
     adminSession: { updateMany: jest.Mock };
     role: { findUnique: jest.Mock };
+    permission: { findUnique: jest.Mock };
+    adminUserPermissionOverride: {
+      findMany: jest.Mock;
+      findUnique: jest.Mock;
+      upsert: jest.Mock;
+      delete: jest.Mock;
+    };
     $transaction: jest.Mock;
   };
   let audit: { record: jest.Mock };
@@ -70,6 +77,13 @@ describe('AdminManagementService', () => {
       },
       adminSession: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
       role: { findUnique: jest.fn() },
+      permission: { findUnique: jest.fn() },
+      adminUserPermissionOverride: {
+        findMany: jest.fn(),
+        findUnique: jest.fn(),
+        upsert: jest.fn(),
+        delete: jest.fn().mockResolvedValue({}),
+      },
       $transaction: jest.fn().mockResolvedValue([adminRow({ status: 'Suspended' }), { count: 1 }]),
     };
     audit = { record: jest.fn().mockResolvedValue(undefined) };
@@ -233,6 +247,154 @@ describe('AdminManagementService', () => {
       await service.revokeSessions(ACTOR, 'admin-2', CTX);
       expect(prisma.adminSession.updateMany).toHaveBeenCalled();
       expect(audit.record).toHaveBeenCalled();
+    });
+  });
+
+  describe('permission overrides', () => {
+    const PERM = { id: 'perm-1', key: 'users.suspend' };
+    function overrideRow(overrides: Record<string, unknown> = {}) {
+      return {
+        id: 'ovr-1',
+        adminUserId: 'admin-2',
+        permissionId: 'perm-1',
+        effect: 'GRANT',
+        reason: null,
+        grantedByAdminId: 'actor-1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        ...overrides,
+      };
+    }
+
+    describe('listOverrides', () => {
+      it('404s for a missing admin', async () => {
+        prisma.adminUser.findFirst.mockResolvedValue(null);
+        await expect(service.listOverrides('x')).rejects.toThrow(NotFoundException);
+      });
+
+      it('maps rows to DTOs with the permission key, never the internal id', async () => {
+        prisma.adminUser.findFirst.mockResolvedValue({ id: 'admin-2' });
+        prisma.adminUserPermissionOverride.findMany.mockResolvedValue([
+          { ...overrideRow(), permission: PERM },
+        ]);
+        const list = await service.listOverrides('admin-2');
+        expect(list).toHaveLength(1);
+        expect(list[0].permissionKey).toBe('users.suspend');
+        expect(list[0].effect).toBe('GRANT');
+        expect((list[0] as unknown as Record<string, unknown>).permissionId).toBeUndefined();
+      });
+    });
+
+    describe('upsertOverride', () => {
+      it('404s for a missing admin', async () => {
+        prisma.adminUser.findFirst.mockResolvedValue(null);
+        await expect(
+          service.upsertOverride(ACTOR, 'x', 'users.suspend', { effect: 'GRANT' }, CTX),
+        ).rejects.toThrow(NotFoundException);
+      });
+
+      it('404s for an unknown permission key', async () => {
+        prisma.adminUser.findFirst.mockResolvedValue({ id: 'admin-2' });
+        prisma.permission.findUnique.mockResolvedValue(null);
+        await expect(
+          service.upsertOverride(ACTOR, 'admin-2', 'nope.key', { effect: 'GRANT' }, CTX),
+        ).rejects.toThrow(NotFoundException);
+      });
+
+      it('creates a new override, bumps role-version, and audits as permissions.assign', async () => {
+        prisma.adminUser.findFirst.mockResolvedValue({ id: 'admin-2' });
+        prisma.permission.findUnique.mockResolvedValue(PERM);
+        prisma.adminUserPermissionOverride.findUnique.mockResolvedValue(null);
+        prisma.adminUserPermissionOverride.upsert.mockResolvedValue(
+          overrideRow({ effect: 'GRANT', reason: 'needs export' }),
+        );
+        const res = await service.upsertOverride(
+          ACTOR,
+          'admin-2',
+          'users.suspend',
+          { effect: 'GRANT', reason: 'needs export' },
+          CTX,
+        );
+        expect(res.permissionKey).toBe('users.suspend');
+        expect(res.grantedByAdminId).toBe('actor-1');
+        expect(resolver.bumpRoleVersion).toHaveBeenCalled();
+        expect(audit.record).toHaveBeenCalledWith(
+          expect.objectContaining({
+            action: 'permissions.assign',
+            targetType: 'AdminUser',
+            targetId: 'admin-2',
+            previousValue: null,
+          }),
+        );
+      });
+
+      it('updates the existing row (not a duplicate) on a repeat call, capturing the prior effect', async () => {
+        prisma.adminUser.findFirst.mockResolvedValue({ id: 'admin-2' });
+        prisma.permission.findUnique.mockResolvedValue(PERM);
+        prisma.adminUserPermissionOverride.findUnique.mockResolvedValue(
+          overrideRow({ effect: 'GRANT' }),
+        );
+        prisma.adminUserPermissionOverride.upsert.mockResolvedValue(
+          overrideRow({ effect: 'REVOKE' }),
+        );
+        await service.upsertOverride(ACTOR, 'admin-2', 'users.suspend', { effect: 'REVOKE' }, CTX);
+        // Upsert keyed by the compound unique constraint — one row per pair.
+        expect(prisma.adminUserPermissionOverride.upsert).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: {
+              adminUserId_permissionId: { adminUserId: 'admin-2', permissionId: 'perm-1' },
+            },
+          }),
+        );
+        expect(audit.record).toHaveBeenCalledWith(
+          expect.objectContaining({
+            previousValue: expect.objectContaining({ effect: 'GRANT' }),
+          }),
+        );
+      });
+    });
+
+    describe('removeOverride', () => {
+      it('404s for a missing admin', async () => {
+        prisma.adminUser.findFirst.mockResolvedValue(null);
+        await expect(service.removeOverride(ACTOR, 'x', 'users.suspend', CTX)).rejects.toThrow(
+          NotFoundException,
+        );
+      });
+
+      it('404s for an unknown permission key', async () => {
+        prisma.adminUser.findFirst.mockResolvedValue({ id: 'admin-2' });
+        prisma.permission.findUnique.mockResolvedValue(null);
+        await expect(service.removeOverride(ACTOR, 'admin-2', 'nope.key', CTX)).rejects.toThrow(
+          NotFoundException,
+        );
+      });
+
+      it('is a no-op (no delete, no bump, no audit) when there is no override to remove', async () => {
+        prisma.adminUser.findFirst.mockResolvedValue({ id: 'admin-2' });
+        prisma.permission.findUnique.mockResolvedValue(PERM);
+        prisma.adminUserPermissionOverride.findUnique.mockResolvedValue(null);
+        const res = await service.removeOverride(ACTOR, 'admin-2', 'users.suspend', CTX);
+        expect(res).toEqual({ removed: false });
+        expect(prisma.adminUserPermissionOverride.delete).not.toHaveBeenCalled();
+        expect(resolver.bumpRoleVersion).not.toHaveBeenCalled();
+        expect(audit.record).not.toHaveBeenCalled();
+      });
+
+      it('deletes the row, bumps role-version, and audits when an override exists', async () => {
+        prisma.adminUser.findFirst.mockResolvedValue({ id: 'admin-2' });
+        prisma.permission.findUnique.mockResolvedValue(PERM);
+        prisma.adminUserPermissionOverride.findUnique.mockResolvedValue(overrideRow());
+        const res = await service.removeOverride(ACTOR, 'admin-2', 'users.suspend', CTX);
+        expect(res).toEqual({ removed: true });
+        expect(prisma.adminUserPermissionOverride.delete).toHaveBeenCalledWith({
+          where: { id: 'ovr-1' },
+        });
+        expect(resolver.bumpRoleVersion).toHaveBeenCalled();
+        expect(audit.record).toHaveBeenCalledWith(
+          expect.objectContaining({ action: 'permissions.assign' }),
+        );
+      });
     });
   });
 
