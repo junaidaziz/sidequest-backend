@@ -107,8 +107,7 @@ function bullConnectionFromRedisUrl(redisUrl: string): {
     TasksModule,
     ReferralsModule,
     NotificationsModule,
-    // Phase 4 — admin platform infrastructure (additive; the existing
-    // AdminGuard/x-admin-key route is untouched until its Phase-10 cutover).
+    // Phase 4 — admin platform infrastructure.
     EmailModule,
     AuditLogModule,
     AdminAuthModule,
@@ -119,7 +118,8 @@ function bullConnectionFromRedisUrl(redisUrl: string): {
     // Phase 9 — admin challenge (Mission) authoring: CRUD + publish/archive/etc.
     AdminChallengesModule,
     // Phase 10 — moderation queue + Report/ModerationAction/Appeal workflow, and
-    // the RBAC-gated proof-review route replacing the legacy AdminGuard route.
+    // the RBAC-gated proof-review route. The legacy AdminGuard/x-admin-key
+    // completion-verification route was removed in this phase's cutover.
     ModerationModule,
   ],
   controllers: [AppController],
