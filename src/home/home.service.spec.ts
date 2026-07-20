@@ -1,6 +1,12 @@
 import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
-import { Mission, MissionCategory, MissionDifficulty, VerificationStatus } from '@prisma/client';
+import {
+  Mission,
+  MissionCategory,
+  MissionDifficulty,
+  MissionStatus,
+  VerificationStatus,
+} from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { MissionPoolService } from '../missions/mission-pool.service';
 import { HomeService } from './home.service';
@@ -30,6 +36,18 @@ function makeMission(overrides: Partial<Mission> = {}): Mission {
     settingTags: ['Outdoors'],
     costTier: 0,
     isActive: true,
+    status: MissionStatus.Published,
+    approvedAt: null,
+    approvedByAdminId: null,
+    featured: false,
+    sponsorName: null,
+    startDate: null,
+    endDate: null,
+    participantLimit: null,
+    milestones: null,
+    safetyNotice: null,
+    iconKey: null,
+    createdByAdminId: null,
     createdAt: new Date(),
     updatedAt: new Date(),
     deletedAt: null,
