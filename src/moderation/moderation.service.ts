@@ -287,6 +287,11 @@ export class ModerationService {
    * Records a `ModerationAction` linked to a report and applies its side effect.
    * User-directed suspend/ban reuse the Phase 8 suspend mechanism; reinstate reuses
    * reactivate. Content-directed types additionally require `moderation.remove_content`.
+   *
+   * The user-state side effect and the `ModerationAction` row are written inside one
+   * `prisma.$transaction` so they commit or roll back together — otherwise a failure
+   * on the `moderationAction.create` after a successful suspend would leave the user
+   * suspended with no record of why (backend-eval D3-FAIL-1, Phase 10 cutover review).
    */
   async createAction(
     reportId: string,
@@ -315,24 +320,27 @@ export class ModerationService {
       );
     }
 
-    // Apply the user-state side effect BEFORE recording the action, reusing the exact
-    // Phase 8 mechanism. Suspension is idempotent here: an already-suspended user is
-    // left as-is (a Ban recorded over an existing Suspension does not double-suspend).
-    if (targetUserId && isUserDirected) {
-      await this.applyUserAction(dto.actionType, targetUserId, dto.reason, ctx);
-    }
+    const action = await this.prisma.$transaction(async (tx) => {
+      // Apply the user-state side effect BEFORE recording the action, reusing the
+      // exact Phase 8 mechanism. Suspension is idempotent here: an already-suspended
+      // user is left as-is (a Ban recorded over an existing Suspension does not
+      // double-suspend). Same `tx` as the moderationAction.create below.
+      if (targetUserId && isUserDirected) {
+        await this.applyUserAction(dto.actionType, targetUserId, dto.reason, ctx, tx);
+      }
 
-    const action = await this.prisma.moderationAction.create({
-      data: {
-        reportId: report.id,
-        adminUserId: ctx.actorAdminUserId,
-        actionType: dto.actionType,
-        targetType: report.targetType,
-        targetId: report.targetId,
-        targetUserId: targetUserId ?? null,
-        reason: dto.reason,
-        expiresAt: dto.expiresAt ? new Date(dto.expiresAt) : null,
-      },
+      return tx.moderationAction.create({
+        data: {
+          reportId: report.id,
+          adminUserId: ctx.actorAdminUserId,
+          actionType: dto.actionType,
+          targetType: report.targetType,
+          targetId: report.targetId,
+          targetUserId: targetUserId ?? null,
+          reason: dto.reason,
+          expiresAt: dto.expiresAt ? new Date(dto.expiresAt) : null,
+        },
+      });
     });
 
     await this.recordAudit(
@@ -402,6 +410,12 @@ export class ModerationService {
    * and, if it was a suspension/ban, reactivates the user via the Phase 8 reactivate
    * logic. `Denied` leaves the action standing. Deciding an already-decided appeal
    * is a 409. Appeals are append-only, so only the decision fields are mutated.
+   *
+   * All three writes (the action's `reversedAt`, the reactivate, and the appeal's own
+   * decision fields) run inside one `prisma.$transaction` — otherwise a failure on the
+   * last `appeal.update` would leave a user already reactivated and the action already
+   * marked reversed, but the appeal permanently stuck at `Pending` with no way to
+   * retry through the API (backend-eval D3-FAIL-2, Phase 10 cutover review).
    */
   async decideAppeal(
     id: string,
@@ -419,34 +433,41 @@ export class ModerationService {
       throw new ConflictException(`Appeal is already ${appeal.status} and cannot be changed`);
     }
 
-    if (dto.decision === 'Upheld') {
-      const action = appeal.moderationAction;
-      if (!action.reversedAt) {
-        await this.prisma.moderationAction.update({
-          where: { id: action.id },
-          data: { reversedAt: new Date() },
-        });
-      }
-      const wasUserSuspension =
-        action.actionType === ModerationActionType.SuspendUser ||
-        action.actionType === ModerationActionType.BanUser;
-      if (wasUserSuspension && action.targetUserId) {
-        const user = await this.prisma.user.findUnique({ where: { id: action.targetUserId } });
-        if (user?.suspendedAt) {
-          // Reuse Phase 8 reactivate exactly — do NOT re-implement un-suspend here.
-          await this.adminUsers.reactivate(action.targetUserId, ctx);
+    const updated = await this.prisma.$transaction(async (tx) => {
+      if (dto.decision === 'Upheld') {
+        const action = appeal.moderationAction;
+        if (!action.reversedAt) {
+          await tx.moderationAction.update({
+            where: { id: action.id },
+            data: { reversedAt: new Date() },
+          });
+        }
+        const wasUserSuspension =
+          action.actionType === ModerationActionType.SuspendUser ||
+          action.actionType === ModerationActionType.BanUser;
+        if (wasUserSuspension && action.targetUserId) {
+          const user = await tx.user.findUnique({ where: { id: action.targetUserId } });
+          if (user?.suspendedAt) {
+            // Reuse Phase 8 reactivate exactly — do NOT re-implement un-suspend here.
+            await this.adminUsers.reactivate(action.targetUserId, ctx, tx);
+          }
         }
       }
-    }
 
-    await this.prisma.appeal.update({
-      where: { id },
-      data: {
-        status: dto.decision,
-        reviewedByAdminId: ctx.actorAdminUserId,
-        reviewedAt: new Date(),
-        decisionNote: dto.decisionNote ?? null,
-      },
+      await tx.appeal.update({
+        where: { id },
+        data: {
+          status: dto.decision,
+          reviewedByAdminId: ctx.actorAdminUserId,
+          reviewedAt: new Date(),
+          decisionNote: dto.decisionNote ?? null,
+        },
+      });
+
+      return tx.appeal.findUniqueOrThrow({
+        where: { id },
+        include: { moderationAction: true },
+      });
     });
 
     await this.recordAudit('moderation.manage_appeals', 'Appeal', id, ctx, {
@@ -456,10 +477,6 @@ export class ModerationService {
     });
     this.logger.log(`Appeal ${id} ${dto.decision} by admin ${ctx.actorAdminUserId}`);
 
-    const updated = await this.prisma.appeal.findUniqueOrThrow({
-      where: { id },
-      include: { moderationAction: true },
-    });
     return this.toAppealItem(updated);
   }
 
@@ -583,14 +600,20 @@ export class ModerationService {
     }
   }
 
-  /** Applies a user-directed action's side effect by reusing Phase 8 suspend/reactivate. */
+  /**
+   * Applies a user-directed action's side effect by reusing Phase 8 suspend/reactivate.
+   * Takes the same `tx` the caller's `moderationAction.create` runs in, so a suspension
+   * and the `ModerationAction` row recording why it happened commit or roll back
+   * together (see `createAction`'s doc comment).
+   */
   private async applyUserAction(
     actionType: ModerationActionType,
     targetUserId: string,
     reason: string,
     ctx: ModerationActionContext,
+    tx: Prisma.TransactionClient,
   ): Promise<void> {
-    const user = await this.prisma.user.findUnique({ where: { id: targetUserId } });
+    const user = await tx.user.findUnique({ where: { id: targetUserId } });
     if (!user) {
       throw new NotFoundException('Target user not found');
     }
@@ -604,9 +627,9 @@ export class ModerationService {
 
     if (isSuspending && !user.suspendedAt) {
       // Exact Phase 8 mechanism: sets suspendedAt/reason/by + nulls refreshTokenHash.
-      await this.adminUsers.suspend(targetUserId, { reason }, ctx);
+      await this.adminUsers.suspend(targetUserId, { reason }, ctx, tx);
     } else if (actionType === ModerationActionType.ReinstateUser && user.suspendedAt) {
-      await this.adminUsers.reactivate(targetUserId, ctx);
+      await this.adminUsers.reactivate(targetUserId, ctx, tx);
     }
     // WarnUser (and a repeat suspend on an already-suspended user) record the action
     // without a user-state change.
