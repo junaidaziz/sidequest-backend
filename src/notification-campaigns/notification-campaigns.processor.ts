@@ -156,13 +156,31 @@ export class NotificationCampaignsProcessor extends WorkerHost {
       select: { id: true, userId: true },
     });
 
+    // Batch-load marketing opt-outs for the WHOLE recipient set up front, rather
+    // than one `findUnique` per recipient inside the loop — that was an N+1 that
+    // scaled linearly with audience size (backend-eval D2-FAIL, Phase 11 review).
+    // Absence of a row = enabled (this codebase's universal convention for every
+    // notification preference flag); only an explicit `false` opts out.
+    const optedOutUserIds = new Set(
+      (
+        await this.prisma.notificationPreference.findMany({
+          where: { userId: { in: recipients.map((r) => r.userId) }, marketingEnabled: false },
+          select: { userId: true },
+        })
+      ).map((p) => p.userId),
+    );
+
     const payload = (detail.data as Record<string, unknown> | null) ?? undefined;
     let sent = 0;
     let failed = 0;
     let cancelled = false;
+    // Re-probe cancellation every N recipients instead of every single one — the
+    // per-recipient probe was the other half of the same N+1 finding above. Still
+    // stops a cancelled send promptly without paying a DB round trip per row.
+    const CANCEL_CHECK_INTERVAL = 25;
 
-    for (const recipient of recipients) {
-      if (await this.isCancelled(campaignId)) {
+    for (const [index, recipient] of recipients.entries()) {
+      if (index % CANCEL_CHECK_INTERVAL === 0 && (await this.isCancelled(campaignId))) {
         // Best-effort mid-flight stop: mark everything not yet processed Skipped.
         await this.prisma.notificationCampaignRecipient.updateMany({
           where: { campaignId, status: CampaignRecipientStatus.Pending },
@@ -172,12 +190,7 @@ export class NotificationCampaignsProcessor extends WorkerHost {
         break;
       }
 
-      const preference = await this.prisma.notificationPreference.findUnique({
-        where: { userId: recipient.userId },
-      });
-      // Absence of a row = enabled (universal convention here); only an explicit
-      // `false` opts out. Do NOT invert this default.
-      if (preference && preference.marketingEnabled === false) {
+      if (optedOutUserIds.has(recipient.userId)) {
         await this.prisma.notificationCampaignRecipient.update({
           where: { id: recipient.id },
           data: { status: CampaignRecipientStatus.Skipped, failureReason: SKIP_MARKETING_OPT_OUT },
@@ -186,6 +199,16 @@ export class NotificationCampaignsProcessor extends WorkerHost {
       }
 
       try {
+        // NOTE (backend-eval D3-WARN, Phase 11 review): `notify()`'s Notification
+        // insert and the recipient-status update below are two separate writes,
+        // not one transaction. If the process crashes in the narrow window
+        // between them, this recipient stays `Pending` and a job retry re-sends
+        // it — a duplicate in-app notification/push. Accepted as a documented
+        // trade-off rather than fixed by threading a `tx` through the shared
+        // `NotificationsService.notify()` (used by Tasks/Referrals too), which
+        // would be a much larger-blast-radius change for a narrow, low-frequency
+        // window — same judgment call as the Phase 10 AdminUsersService fix's
+        // audit-write ordering trade-off.
         const notification = await this.notifications.notify({
           userId: recipient.userId,
           type: NotificationType.campaign_broadcast,
