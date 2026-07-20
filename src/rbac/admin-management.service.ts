@@ -8,7 +8,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { AdminUser, Prisma, Role } from '@prisma/client';
+import { AdminUser, AdminUserPermissionOverride, Permission, Prisma, Role } from '@prisma/client';
 import { AdminAuthService, AdminRequestContext } from '../admin-auth/admin-auth.service';
 import { AdminMfaService } from '../admin-auth/admin-mfa.service';
 import { AuthAdmin } from '../admin-auth/types/admin-jwt-payload.interface';
@@ -16,9 +16,10 @@ import { AuditLogService } from '../audit-log/audit-log.service';
 import { AuditResult } from '../audit-log/types/audit';
 import { EmailService } from '../email/email.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { AdminMeDto, AdminUserDto } from './dto/rbac-response.dto';
+import { AdminMeDto, AdminUserDto, PermissionOverrideDto } from './dto/rbac-response.dto';
 import { InviteAdminDto } from './dto/invite-admin.dto';
 import { UpdateAdminDto } from './dto/update-admin.dto';
+import { UpsertPermissionOverrideDto } from './dto/upsert-permission-override.dto';
 import { PermissionResolverService } from './permission-resolver.service';
 
 /**
@@ -283,6 +284,181 @@ export class AdminManagementService {
       ipAddress: ctx.ipAddress,
       userAgent: ctx.userAgent,
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Per-admin permission overrides.
+  //
+  // These layer a single GRANT/REVOKE on top of an admin's role baseline. They
+  // are gated at the controller by `permissions.assign` — the purpose-built
+  // catalog permission ("Grant or revoke granular permission overrides"), NOT by
+  // `admins.manage`. `permissions.assign` is the granular-permission analog of
+  // the `roles.assign` gate that already guards role reassignment on `update()`;
+  // both are distinct Administration-category permissions held only by
+  // Owner/Super Admin in the seed, so an admin who can invite/edit accounts
+  // (`admins.manage`) still cannot silently escalate a peer's individual
+  // permissions unless they also hold `permissions.assign`. Reading overrides is
+  // gated by `admins.view`, matching `GET /admin/admins/:id`.
+  // ---------------------------------------------------------------------------
+
+  /** Lists an admin's current permission overrides (their divergence from the role baseline). */
+  async listOverrides(adminId: string): Promise<PermissionOverrideDto[]> {
+    // Mirror the exact existence check the other admin-management mutations use:
+    // present and not soft-deleted. (Suspended admins are still addressable, as
+    // with update/disable — a suspension shouldn't strand their override config.)
+    const admin = await this.prisma.adminUser.findFirst({
+      where: { id: adminId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!admin) {
+      throw new NotFoundException('Admin not found');
+    }
+    const overrides = await this.prisma.adminUserPermissionOverride.findMany({
+      where: { adminUserId: adminId },
+      include: { permission: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    return overrides.map((o) => this.toOverrideDto(o, o.permission));
+  }
+
+  /**
+   * Upserts a single GRANT/REVOKE override for one admin+permission. The unique
+   * constraint on `[adminUserId, permissionId]` makes a repeat call for the same
+   * pair update the existing effect/reason rather than duplicate or error. Bumps
+   * the global role-version afterward so the change is reflected in the admin's
+   * effective permission set immediately (no stale-cache window).
+   */
+  async upsertOverride(
+    actor: AuthAdmin,
+    adminId: string,
+    permissionKey: string,
+    dto: UpsertPermissionOverrideDto,
+    ctx: AdminRequestContext,
+  ): Promise<PermissionOverrideDto> {
+    const admin = await this.prisma.adminUser.findFirst({
+      where: { id: adminId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!admin) {
+      throw new NotFoundException('Admin not found');
+    }
+    const permission = await this.prisma.permission.findUnique({ where: { key: permissionKey } });
+    if (!permission) {
+      throw new NotFoundException(`Unknown permission key: ${permissionKey}`);
+    }
+
+    const existing = await this.prisma.adminUserPermissionOverride.findUnique({
+      where: { adminUserId_permissionId: { adminUserId: adminId, permissionId: permission.id } },
+    });
+
+    const override = await this.prisma.adminUserPermissionOverride.upsert({
+      where: { adminUserId_permissionId: { adminUserId: adminId, permissionId: permission.id } },
+      create: {
+        adminUserId: adminId,
+        permissionId: permission.id,
+        effect: dto.effect,
+        reason: dto.reason ?? null,
+        grantedByAdminId: actor.adminUserId,
+      },
+      update: {
+        effect: dto.effect,
+        reason: dto.reason ?? null,
+        grantedByAdminId: actor.adminUserId,
+      },
+    });
+
+    // The override changes this admin's effective permission set — invalidate the
+    // Redis-cached set exactly as role/permission edits do (role.service mirror).
+    await this.resolver.bumpRoleVersion();
+
+    await this.audit.record({
+      actorAdminUserId: actor.adminUserId,
+      action: 'permissions.assign',
+      targetType: 'AdminUser',
+      targetId: adminId,
+      previousValue: existing
+        ? { permissionKey, effect: existing.effect, reason: existing.reason }
+        : null,
+      newValue: {
+        permissionKey,
+        effect: override.effect,
+        reason: override.reason,
+        action: 'upsert',
+      },
+      result: AuditResult.Success,
+      reason: dto.reason ?? null,
+      ipAddress: ctx.ipAddress,
+      userAgent: ctx.userAgent,
+    });
+
+    return this.toOverrideDto(override, permission);
+  }
+
+  /**
+   * Removes an admin's override for a permission, reverting them to the role's
+   * baseline for that permission (deleting the row is distinct from writing a
+   * REVOKE, which actively subtracts). Idempotent — a no-op if no override
+   * exists — but still 404s on an unknown permission key so a typo isn't
+   * silently swallowed. Only bumps the role-version / audits when a row was
+   * actually removed, so a redundant delete produces no cache churn or log noise.
+   */
+  async removeOverride(
+    actor: AuthAdmin,
+    adminId: string,
+    permissionKey: string,
+    ctx: AdminRequestContext,
+  ): Promise<{ removed: boolean }> {
+    const admin = await this.prisma.adminUser.findFirst({
+      where: { id: adminId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!admin) {
+      throw new NotFoundException('Admin not found');
+    }
+    const permission = await this.prisma.permission.findUnique({ where: { key: permissionKey } });
+    if (!permission) {
+      throw new NotFoundException(`Unknown permission key: ${permissionKey}`);
+    }
+
+    const existing = await this.prisma.adminUserPermissionOverride.findUnique({
+      where: { adminUserId_permissionId: { adminUserId: adminId, permissionId: permission.id } },
+    });
+    if (!existing) {
+      return { removed: false };
+    }
+
+    await this.prisma.adminUserPermissionOverride.delete({ where: { id: existing.id } });
+    await this.resolver.bumpRoleVersion();
+
+    await this.audit.record({
+      actorAdminUserId: actor.adminUserId,
+      action: 'permissions.assign',
+      targetType: 'AdminUser',
+      targetId: adminId,
+      previousValue: { permissionKey, effect: existing.effect, reason: existing.reason },
+      newValue: { permissionKey, action: 'remove' },
+      result: AuditResult.Success,
+      ipAddress: ctx.ipAddress,
+      userAgent: ctx.userAgent,
+    });
+
+    return { removed: true };
+  }
+
+  private toOverrideDto(
+    override: AdminUserPermissionOverride,
+    permission: Permission,
+  ): PermissionOverrideDto {
+    return {
+      id: override.id,
+      adminUserId: override.adminUserId,
+      permissionKey: permission.key,
+      effect: override.effect,
+      reason: override.reason,
+      grantedByAdminId: override.grantedByAdminId,
+      createdAt: override.createdAt,
+      updatedAt: override.updatedAt,
+    };
   }
 
   private toDto(admin: AdminUser, role: Role): AdminUserDto {
