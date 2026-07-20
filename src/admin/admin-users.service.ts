@@ -102,6 +102,13 @@ export class AdminUsersService {
    * its own writes (e.g. `ModerationService.createAction` recording the
    * `ModerationAction` row a suspension was taken under) can enlist it in their
    * own `prisma.$transaction` instead of this running on its own connection.
+   *
+   * NOTE: the audit-log write below is NOT enlisted in `tx` — it always uses
+   * `this.audit` on its own connection, matching this codebase's best-effort
+   * audit convention. When called with a `tx`, a later failure elsewhere in the
+   * caller's transaction rolls back this method's user-state write but not the
+   * audit record, which stays committed (accepted trade-off, not an oversight —
+   * see the Phase 10 atomicity fix's backend-eval re-check for the reasoning).
    */
   async suspend(
     userId: string,
