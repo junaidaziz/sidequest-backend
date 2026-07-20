@@ -1,6 +1,7 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { IsBoolean, IsEnum, IsISO8601, IsInt, IsOptional, Min } from 'class-validator';
 import { CampaignPushPlatform, CampaignTargetFilter } from '../types/campaign-targeting';
+import { IsGreaterOrEqualToField, IsNotSetWithField } from '../validators/target-range.validator';
 
 /**
  * Structured targeting criteria for a campaign. Every dimension is optional; an
@@ -27,6 +28,9 @@ export class CampaignTargetFilterDto implements CampaignTargetFilter {
   })
   @IsOptional()
   @IsISO8601()
+  @IsGreaterOrEqualToField('registeredAfter', {
+    message: 'registeredBefore must be on or after registeredAfter',
+  })
   registeredBefore?: string;
 
   @ApiPropertyOptional({
@@ -43,6 +47,7 @@ export class CampaignTargetFilterDto implements CampaignTargetFilter {
   @IsOptional()
   @IsInt()
   @Min(0)
+  @IsGreaterOrEqualToField('minTotalXp', { message: 'maxTotalXp must be >= minTotalXp' })
   maxTotalXp?: number;
 
   @ApiPropertyOptional({ description: 'true = guest sessions only, false = full accounts only' })
@@ -64,6 +69,9 @@ export class CampaignTargetFilterDto implements CampaignTargetFilter {
   })
   @IsOptional()
   @IsISO8601()
+  @IsNotSetWithField('activeSince', {
+    message: 'activeSince and inactiveSince are contradictory and cannot both be set',
+  })
   inactiveSince?: string;
 
   @ApiPropertyOptional({
