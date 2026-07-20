@@ -14,7 +14,7 @@ const ID = '11111111-1111-1111-1111-111111111111';
 
 interface TxMock {
   $queryRaw: jest.Mock;
-  notificationCampaign: { update: jest.Mock };
+  notificationCampaign: { update: jest.Mock; findUniqueOrThrow: jest.Mock };
 }
 
 function baseCampaign(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -61,8 +61,17 @@ describe('NotificationCampaignsService', () => {
 
   beforeEach(() => {
     tx = {
-      $queryRaw: jest.fn(),
-      notificationCampaign: { update: jest.fn().mockResolvedValue(baseCampaign()) },
+      // Default: a Draft row, so update()/remove() tests that don't override this
+      // (i.e. every "happy path" test) pass the lock's status check unchanged.
+      $queryRaw: jest
+        .fn()
+        .mockResolvedValue([
+          { id: ID, status: NotificationCampaignStatus.Draft, scheduledAt: null, deletedAt: null },
+        ]),
+      notificationCampaign: {
+        update: jest.fn().mockResolvedValue(baseCampaign()),
+        findUniqueOrThrow: jest.fn().mockResolvedValue(baseCampaign()),
+      },
     };
     prisma = {
       // Support both array-form ($transaction([...])) and callback-form.
@@ -197,7 +206,7 @@ describe('NotificationCampaignsService', () => {
   describe('update', () => {
     it('edits a Draft', async () => {
       await service.update(ID, { title: 'New title' }, CTX);
-      expect(prisma.notificationCampaign.update).toHaveBeenCalledWith(
+      expect(tx.notificationCampaign.update).toHaveBeenCalledWith(
         expect.objectContaining({ where: { id: ID } }),
       );
     });
@@ -215,7 +224,7 @@ describe('NotificationCampaignsService', () => {
         },
         CTX,
       );
-      const call = prisma.notificationCampaign.update.mock.calls[0][0] as {
+      const call = tx.notificationCampaign.update.mock.calls[0][0] as {
         data: Record<string, unknown>;
       };
       expect(call.data).toMatchObject({
@@ -230,20 +239,34 @@ describe('NotificationCampaignsService', () => {
 
     it('sets scheduledAt to null when passed an empty value', async () => {
       await service.update(ID, { scheduledAt: '' }, CTX);
-      const call = prisma.notificationCampaign.update.mock.calls[0][0] as {
+      const call = tx.notificationCampaign.update.mock.calls[0][0] as {
         data: Record<string, unknown>;
       };
       expect(call.data.scheduledAt).toBeNull();
     });
 
     it('throws 409 when the campaign is no longer a Draft', async () => {
-      prisma.notificationCampaign.findFirst.mockResolvedValue(
-        baseCampaign({ status: NotificationCampaignStatus.Sending }),
-      );
+      tx.$queryRaw.mockResolvedValue([
+        { id: ID, status: NotificationCampaignStatus.Sending, scheduledAt: null, deletedAt: null },
+      ]);
       await expect(service.update(ID, { title: 'X' }, CTX)).rejects.toBeInstanceOf(
         ConflictException,
       );
-      expect(prisma.notificationCampaign.update).not.toHaveBeenCalled();
+      expect(tx.notificationCampaign.update).not.toHaveBeenCalled();
+    });
+
+    it('is row-locked: a concurrent send that already flipped the campaign out of Draft wins', async () => {
+      // Simulates the exact TOCTOU this fix closes (backend-eval D3-FAIL, Phase 11
+      // review): the lock sees Sending (as if a concurrent send() got there first),
+      // so this update must be rejected rather than silently overwriting content
+      // the fan-out has already started reading.
+      tx.$queryRaw.mockResolvedValue([
+        { id: ID, status: NotificationCampaignStatus.Sending, scheduledAt: null, deletedAt: null },
+      ]);
+      await expect(service.update(ID, { headline: 'New headline' }, CTX)).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      expect(tx.notificationCampaign.update).not.toHaveBeenCalled();
     });
   });
 
