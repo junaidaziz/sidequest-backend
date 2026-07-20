@@ -143,6 +143,10 @@ export class AdminManagementController {
     summary: 'Grant or revoke a single permission for an admin (upsert; idempotent per pair)',
   })
   @ApiResponse({ status: 200, type: PermissionOverrideDto })
+  @ApiResponse({
+    status: 400,
+    description: 'Invalid or missing effect field (must be GRANT or REVOKE)',
+  })
   @ApiResponse({ status: 403, description: 'Missing permissions.assign permission' })
   @ApiResponse({ status: 404, description: 'Admin or permission key not found' })
   upsertOverride(
@@ -156,6 +160,15 @@ export class AdminManagementController {
     return this.service.upsertOverride(actor, id, permissionKey, dto, this.ctx(ip, userAgent));
   }
 
+  // NOTE (backend-eval B4, reviewed): a pure-REST reading would make this 204
+  // with no body, since it deletes a row rather than transitioning a resource's
+  // state. Deliberately kept at 200 + AdminSuccessResponseDto instead, to match
+  // every other admin-management action route in this controller (`disable`,
+  // `reset-mfa`, `revoke-sessions`) — all four are "take this admin action"
+  // endpoints from a caller's perspective, and giving them one uniform response
+  // shape (rather than three returning `{ success: true }` and this one alone
+  // returning an empty body) is worth more than REST purity on a single route
+  // in an otherwise-consistent, small controller.
   @Delete(':id/overrides/:permissionKey')
   @RequirePermission('permissions.assign')
   @HttpCode(HttpStatus.OK)
