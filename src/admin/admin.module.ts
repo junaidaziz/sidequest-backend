@@ -25,5 +25,9 @@ import { AdminUsersService } from './admin-users.service';
   imports: [AuthModule, AuditLogModule, StorageModule],
   controllers: [AdminController, AdminUsersController],
   providers: [AdminService, AdminUsersService],
+  // AdminUsersService is exported so the Phase 10 moderation module can REUSE its
+  // Phase 8 suspend/reactivate logic (the one that nulls refreshTokenHash and that
+  // JwtStrategy checks) rather than duplicating a parallel suspension flow.
+  exports: [AdminUsersService],
 })
 export class AdminModule {}
