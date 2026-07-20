@@ -56,4 +56,53 @@ describe('Campaign DTO validation', () => {
     const query = plainToInstance(ListCampaignsQueryDto, { page: 'abc' });
     expect(validateSync(query).length).toBeGreaterThan(0);
   });
+
+  // Cross-field target-filter checks (backend-eval B1-WARN, Phase 11 review):
+  // an inverted range or a self-contradictory combination used to silently
+  // resolve to a 0-user audience instead of a 400.
+  describe('CampaignTargetFilterDto cross-field validation', () => {
+    it('accepts a coherent range and rejects nothing extra', () => {
+      const dto = plainToInstance(CampaignTargetFilterDto, {
+        minTotalXp: 10,
+        maxTotalXp: 100,
+        registeredAfter: '2026-01-01T00:00:00Z',
+        registeredBefore: '2026-06-01T00:00:00Z',
+      });
+      expect(validateSync(dto)).toHaveLength(0);
+    });
+
+    it('rejects maxTotalXp below minTotalXp', () => {
+      const dto = plainToInstance(CampaignTargetFilterDto, { minTotalXp: 100, maxTotalXp: 10 });
+      expect(validateSync(dto).length).toBeGreaterThan(0);
+    });
+
+    it('rejects registeredBefore earlier than registeredAfter', () => {
+      const dto = plainToInstance(CampaignTargetFilterDto, {
+        registeredAfter: '2026-06-01T00:00:00Z',
+        registeredBefore: '2026-01-01T00:00:00Z',
+      });
+      expect(validateSync(dto).length).toBeGreaterThan(0);
+    });
+
+    it('rejects activeSince and inactiveSince set together', () => {
+      const dto = plainToInstance(CampaignTargetFilterDto, {
+        activeSince: '2026-01-01T00:00:00Z',
+        inactiveSince: '2026-02-01T00:00:00Z',
+      });
+      expect(validateSync(dto).length).toBeGreaterThan(0);
+    });
+
+    it('accepts activeSince alone and inactiveSince alone', () => {
+      expect(
+        validateSync(
+          plainToInstance(CampaignTargetFilterDto, { activeSince: '2026-01-01T00:00:00Z' }),
+        ),
+      ).toHaveLength(0);
+      expect(
+        validateSync(
+          plainToInstance(CampaignTargetFilterDto, { inactiveSince: '2026-01-01T00:00:00Z' }),
+        ),
+      ).toHaveLength(0);
+    });
+  });
 });
