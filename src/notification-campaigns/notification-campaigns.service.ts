@@ -137,36 +137,50 @@ export class NotificationCampaignsService {
     return this.toDetail(campaign, this.emptyStats());
   }
 
-  /** Edits a campaign — allowed ONLY while `Draft` (a 409 otherwise). */
+  /**
+   * Edits a campaign — allowed ONLY while `Draft` (a 409 otherwise). Row-locked
+   * (same pattern as `remove()`) so a concurrent `send()` can't flip the campaign
+   * to `Sending` between the status check and this write — without the lock, a
+   * `send()` that wins the race would already have handed `headline`/`body` to
+   * the fan-out processor by the time this update lands, silently sending a
+   * mix of old and new content to different recipients (backend-eval D3-FAIL,
+   * Phase 11 review — the exact hazard `remove()` was already guarded against).
+   */
   async update(
     id: string,
     dto: UpdateCampaignDto,
     ctx: CampaignActionContext,
   ): Promise<CampaignDetailDto> {
-    const existing = await this.findActive(id);
-    if (existing.status !== NotificationCampaignStatus.Draft) {
-      throw new ConflictException(
-        `Campaign is ${existing.status} and can no longer be edited (only a Draft is editable)`,
-      );
-    }
+    const previousTitle = await this.prisma.$transaction(async (tx) => {
+      const row = await this.lockCampaign(tx, id);
+      if (row.status !== NotificationCampaignStatus.Draft) {
+        throw new ConflictException(
+          `Campaign is ${row.status} and can no longer be edited (only a Draft is editable)`,
+        );
+      }
 
-    const data: Prisma.NotificationCampaignUncheckedUpdateInput = {
-      updatedByAdminId: ctx.actorAdminUserId,
-    };
-    if (dto.title !== undefined) data.title = dto.title;
-    if (dto.headline !== undefined) data.headline = dto.headline;
-    if (dto.body !== undefined) data.body = dto.body;
-    if (dto.data !== undefined) data.data = this.toJsonInput(dto.data);
-    if (dto.targetFilter !== undefined) {
-      data.targetFilter = this.toJsonInput(dto.targetFilter as Record<string, unknown>);
-    }
-    if (dto.scheduledAt !== undefined) {
-      data.scheduledAt = dto.scheduledAt ? new Date(dto.scheduledAt) : null;
-    }
+      const data: Prisma.NotificationCampaignUncheckedUpdateInput = {
+        updatedByAdminId: ctx.actorAdminUserId,
+      };
+      if (dto.title !== undefined) data.title = dto.title;
+      if (dto.headline !== undefined) data.headline = dto.headline;
+      if (dto.body !== undefined) data.body = dto.body;
+      if (dto.data !== undefined) data.data = this.toJsonInput(dto.data);
+      if (dto.targetFilter !== undefined) {
+        data.targetFilter = this.toJsonInput(dto.targetFilter as Record<string, unknown>);
+      }
+      if (dto.scheduledAt !== undefined) {
+        data.scheduledAt = dto.scheduledAt ? new Date(dto.scheduledAt) : null;
+      }
 
-    const updated = await this.prisma.notificationCampaign.update({ where: { id }, data });
+      const current = await tx.notificationCampaign.findUniqueOrThrow({ where: { id } });
+      await tx.notificationCampaign.update({ where: { id }, data });
+      return current.title;
+    });
+
+    const updated = await this.findActive(id);
     await this.recordAudit(MANAGE_PERMISSION, id, ctx, {
-      previous: { title: existing.title },
+      previous: { title: previousTitle },
       next: { title: updated.title },
       reason: null,
     });
