@@ -10,6 +10,7 @@ import {
   Param,
   Patch,
   Post,
+  Put,
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
@@ -21,8 +22,9 @@ import { AdminSuccessResponseDto } from '../admin-auth/dto/generic-response.dto'
 import { AdminManagementService } from './admin-management.service';
 import { RequirePermission } from './decorators/require-permission.decorator';
 import { InviteAdminDto } from './dto/invite-admin.dto';
-import { AdminMeDto, AdminUserDto } from './dto/rbac-response.dto';
+import { AdminMeDto, AdminUserDto, PermissionOverrideDto } from './dto/rbac-response.dto';
 import { UpdateAdminDto } from './dto/update-admin.dto';
+import { UpsertPermissionOverrideDto } from './dto/upsert-permission-override.dto';
 import { PermissionGuard } from './guards/permission.guard';
 
 /** Admin user management. Every route is permission-gated per the Phase-3 catalog. */
@@ -113,6 +115,65 @@ export class AdminManagementController {
     @Headers('user-agent') userAgent?: string,
   ): Promise<AdminUserDto> {
     return this.service.disable(actor, id, this.ctx(ip, userAgent));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Per-admin permission overrides (GRANT/REVOKE a single permission on top of
+  // the admin's role baseline). Mutations are gated by `permissions.assign` — the
+  // dedicated catalog permission for exactly this ("Grant or revoke granular
+  // permission overrides"), the granular-permission analog of the `roles.assign`
+  // gate on role reassignment. Reading is gated by `admins.view`, matching the
+  // rest of the admin-detail surface. See AdminManagementService for the full
+  // rationale on why this is NOT folded under `admins.manage`.
+  // ---------------------------------------------------------------------------
+
+  @Get(':id/overrides')
+  @RequirePermission('admins.view')
+  @ApiOperation({ summary: "List an admin's permission overrides (divergence from role baseline)" })
+  @ApiResponse({ status: 200, type: [PermissionOverrideDto] })
+  @ApiResponse({ status: 403, description: 'Missing admins.view permission' })
+  @ApiResponse({ status: 404, description: 'Admin not found' })
+  listOverrides(@Param('id') id: string): Promise<PermissionOverrideDto[]> {
+    return this.service.listOverrides(id);
+  }
+
+  @Put(':id/overrides/:permissionKey')
+  @RequirePermission('permissions.assign')
+  @ApiOperation({
+    summary: 'Grant or revoke a single permission for an admin (upsert; idempotent per pair)',
+  })
+  @ApiResponse({ status: 200, type: PermissionOverrideDto })
+  @ApiResponse({ status: 403, description: 'Missing permissions.assign permission' })
+  @ApiResponse({ status: 404, description: 'Admin or permission key not found' })
+  upsertOverride(
+    @CurrentAdmin() actor: AuthAdmin,
+    @Param('id') id: string,
+    @Param('permissionKey') permissionKey: string,
+    @Body() dto: UpsertPermissionOverrideDto,
+    @Ip() ip: string,
+    @Headers('user-agent') userAgent?: string,
+  ): Promise<PermissionOverrideDto> {
+    return this.service.upsertOverride(actor, id, permissionKey, dto, this.ctx(ip, userAgent));
+  }
+
+  @Delete(':id/overrides/:permissionKey')
+  @RequirePermission('permissions.assign')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: "Remove an admin's override for a permission (revert to role baseline; idempotent)",
+  })
+  @ApiResponse({ status: 200, type: AdminSuccessResponseDto })
+  @ApiResponse({ status: 403, description: 'Missing permissions.assign permission' })
+  @ApiResponse({ status: 404, description: 'Admin or permission key not found' })
+  async removeOverride(
+    @CurrentAdmin() actor: AuthAdmin,
+    @Param('id') id: string,
+    @Param('permissionKey') permissionKey: string,
+    @Ip() ip: string,
+    @Headers('user-agent') userAgent?: string,
+  ): Promise<AdminSuccessResponseDto> {
+    await this.service.removeOverride(actor, id, permissionKey, this.ctx(ip, userAgent));
+    return { success: true };
   }
 
   @Post(':id/reset-mfa')
