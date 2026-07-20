@@ -25,6 +25,9 @@ describe('AdminManagementController', () => {
       resetMfa: jest.fn().mockResolvedValue(undefined),
       revokeSessions: jest.fn().mockResolvedValue(undefined),
       getSelf: jest.fn().mockResolvedValue({ id: 'actor-1', permissions: [] }),
+      listOverrides: jest.fn().mockResolvedValue([]),
+      upsertOverride: jest.fn().mockResolvedValue({ id: 'ovr-1', permissionKey: 'users.suspend' }),
+      removeOverride: jest.fn().mockResolvedValue({ removed: true }),
     };
     controller = new AdminManagementController(service as unknown as AdminManagementService);
   });
@@ -56,5 +59,33 @@ describe('AdminManagementController', () => {
   it('getSelf delegates to the service with the calling actor', async () => {
     await controller.getSelf(ACTOR);
     expect(service.getSelf).toHaveBeenCalledWith(ACTOR);
+  });
+
+  it('listOverrides delegates with the admin id', async () => {
+    await controller.listOverrides('a');
+    expect(service.listOverrides).toHaveBeenCalledWith('a');
+  });
+
+  it('upsertOverride passes actor, id, permission key, and body', async () => {
+    await controller.upsertOverride(ACTOR, 'a', 'users.suspend', { effect: 'GRANT' }, '1.2.3.4');
+    expect(service.upsertOverride).toHaveBeenCalledWith(
+      ACTOR,
+      'a',
+      'users.suspend',
+      { effect: 'GRANT' },
+      expect.any(Object),
+    );
+  });
+
+  it('removeOverride delegates and returns a success acknowledgement', async () => {
+    expect(await controller.removeOverride(ACTOR, 'a', 'users.suspend', '1.2.3.4')).toEqual({
+      success: true,
+    });
+    expect(service.removeOverride).toHaveBeenCalledWith(
+      ACTOR,
+      'a',
+      'users.suspend',
+      expect.any(Object),
+    );
   });
 });
