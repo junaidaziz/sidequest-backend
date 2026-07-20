@@ -81,6 +81,7 @@ export class AdminAuthController {
   }
 
   @Post('mfa/setup')
+  @Throttle(AUTH_THROTTLE)
   @UseGuards(AdminJwtAuthGuard)
   @ApiBearerAuth()
   @HttpCode(HttpStatus.OK)
@@ -97,6 +98,7 @@ export class AdminAuthController {
   }
 
   @Post('mfa/verify')
+  @Throttle(AUTH_THROTTLE)
   @UseGuards(AdminJwtAuthGuard)
   @ApiBearerAuth()
   @HttpCode(HttpStatus.OK)
