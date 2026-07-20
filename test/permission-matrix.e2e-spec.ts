@@ -38,6 +38,16 @@ import { resetThrottleState } from './support/reset-throttle';
  * Ungated routes (no `@RequirePermission`) are enumerated in a report, split
  * into admin-surface (scrutinized) vs non-admin user/public (outside RBAC), and
  * do NOT fail the suite — being ungated is sometimes correct by design.
+ *
+ * SCOPE NOTE (backend-eval C-WARN-1): this matrix only sees DECORATOR-level
+ * `@RequirePermission` metadata. `POST /admin/reports/:id/actions` additionally
+ * enforces a second, service-level permission check inside
+ * `ModerationService.createAction` (`moderation.remove_content`, required only
+ * for content-directed action types) — invisible to introspection, and not
+ * exercised meaningfully here since the placeholder-UUID request 404s on the
+ * report lookup before that check is ever reached. That secondary check has
+ * its own dedicated coverage in `moderation.service.spec.ts`; this matrix does
+ * not (and structurally cannot) substitute for it.
  */
 
 const ALL_ROUTES = discoverRoutes();
@@ -311,7 +321,10 @@ describe('RBAC permission matrix — every gated route enforces its permission (
     const INTENTIONALLY_UNGATED_ADMIN_PATHS = new Set(['/admin/admins/me']);
     const suspicious = adminUngated.filter(
       (route) =>
-        !route.fullPath.startsWith('/admin/auth') &&
+        // Trailing slash so a hypothetical future `/admin/authz` (or any other
+        // controller whose base path merely starts with the letters "auth")
+        // can't silently ride through this allow-list (backend-eval C-WARN-2).
+        !route.fullPath.startsWith('/admin/auth/') &&
         !INTENTIONALLY_UNGATED_ADMIN_PATHS.has(route.fullPath),
     );
     expect(suspicious.map(format)).toEqual([]);
