@@ -75,6 +75,7 @@ export class ModerationController {
     summary: 'Unified, paginated queue of pending proof completions and task submissions',
   })
   @ApiResponse({ status: 200, type: ModerationQueuePageDto })
+  @ApiResponse({ status: 400, description: 'Invalid query parameters' })
   getQueue(@Query() query: ModerationQueueQueryDto): Promise<ModerationQueuePageDto> {
     return this.service.getQueue(query);
   }
@@ -83,6 +84,7 @@ export class ModerationController {
   @RequirePermission('moderation.view_queue')
   @ApiOperation({ summary: 'Read-only moderation-action history (repeat-offender query)' })
   @ApiResponse({ status: 200, type: ModerationActionPageDto })
+  @ApiResponse({ status: 400, description: 'Invalid query parameters' })
   listActions(@Query() query: ListModerationActionsQueryDto): Promise<ModerationActionPageDto> {
     return this.service.listActions(query);
   }
@@ -93,6 +95,7 @@ export class ModerationController {
   @RequirePermission('moderation.manage_reports')
   @ApiOperation({ summary: 'Search / filter / paginate reports' })
   @ApiResponse({ status: 200, type: ReportPageDto })
+  @ApiResponse({ status: 400, description: 'Invalid query parameters' })
   listReports(@Query() query: ListReportsQueryDto): Promise<ReportPageDto> {
     return this.service.listReports(query);
   }
@@ -131,6 +134,13 @@ export class ModerationController {
   @Post('reports/:id/actions')
   @HttpCode(HttpStatus.CREATED)
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  // NOTE: `moderation.take_action` is necessary but not sufficient — for a
+  // content-directed actionType (HideContent/RemoveContent/ReinstateContent),
+  // ModerationService.createAction() additionally requires moderation.remove_content
+  // via a second, service-level PermissionResolverService check. That check can't be
+  // expressed as a second @RequirePermission here (this decorator gates ALL action
+  // types on this route, not just the content-directed ones) — a reviewer auditing
+  // only this controller's decorators would miss that extra gate.
   @RequirePermission('moderation.take_action')
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiOperation({
@@ -157,6 +167,7 @@ export class ModerationController {
   @RequirePermission('moderation.manage_appeals')
   @ApiOperation({ summary: 'Search / filter / paginate appeals' })
   @ApiResponse({ status: 200, type: AppealPageDto })
+  @ApiResponse({ status: 400, description: 'Invalid query parameters' })
   listAppeals(@Query() query: ListAppealsQueryDto): Promise<AppealPageDto> {
     return this.service.listAppeals(query);
   }
@@ -169,6 +180,7 @@ export class ModerationController {
     summary: 'Decide an appeal — Upheld reverses the action (un-suspends), Denied lets it stand',
   })
   @ApiResponse({ status: 200, type: AppealListItemDto })
+  @ApiResponse({ status: 400, description: 'Invalid decision value' })
   @ApiResponse({ status: 404, description: 'Appeal not found' })
   @ApiResponse({ status: 409, description: 'Appeal is already decided' })
   decideAppeal(
