@@ -369,6 +369,7 @@ describe('NotificationsService', () => {
       prisma.notification.create.mockResolvedValue(baseNotification({ id: 'n-11' }));
       queue.enqueuePushDelivery.mockRejectedValue(new Error('redis down'));
 
+      // Resolves to the created row (never rejects) even when the push enqueue fails.
       await expect(
         service.notify({
           userId: USER,
@@ -376,7 +377,7 @@ describe('NotificationsService', () => {
           title: 'T',
           body: 'B',
         }),
-      ).resolves.toBeUndefined();
+      ).resolves.toMatchObject({ id: 'n-11' });
     });
 
     it('swallows a non-Error enqueue rejection too', async () => {
@@ -390,7 +391,7 @@ describe('NotificationsService', () => {
           title: 'T',
           body: 'B',
         }),
-      ).resolves.toBeUndefined();
+      ).resolves.toMatchObject({ id: 'n-12' });
     });
   });
 });
