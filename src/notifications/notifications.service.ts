@@ -217,8 +217,13 @@ export class NotificationsService {
    * Callers additionally wrap this whole call in their own try/catch (the
    * notification-hook isolation pattern), so even the row write here can never
    * break the primary operation the notification is attached to.
+   *
+   * Returns the created row so a caller that needs to correlate it can capture its
+   * id — the campaign fan-out (Phase 11) uses this to stamp
+   * `NotificationCampaignRecipient.notificationId`. Existing callers that ignore
+   * the return value are unaffected (the enqueue side effect is unchanged).
    */
-  async notify(params: NotifyParams): Promise<void> {
+  async notify(params: NotifyParams): Promise<Notification> {
     const { userId, type, title, body, data } = params;
     const notification = await this.prisma.notification.create({
       data: {
@@ -237,6 +242,7 @@ export class NotificationsService {
         error instanceof Error ? error.stack : undefined,
       );
     }
+    return notification;
   }
 
   // --------------------------------------------------------------------------
