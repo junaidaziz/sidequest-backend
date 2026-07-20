@@ -467,6 +467,24 @@ describe('AnalyticsService', () => {
       redis.set.mockRejectedValue(new Error('connection refused'));
       await expect(build().getOverview({})).resolves.toBeDefined();
     });
+
+    it('rounds the cache key to the minute so two unparameterized requests share a hit (backend-eval WARN)', async () => {
+      // Without rounding, `to` defaults to `new Date()` — millisecond-precise —
+      // so two requests issued moments apart would each miss the cache even
+      // though they should reuse the same computed block for the common
+      // no-date-params dashboard load.
+      stubAllAggregates();
+      const service = build();
+
+      await service.getOverview({});
+      const writtenKey = redis.set.mock.calls[0][0] as string;
+
+      redis.get.mockResolvedValueOnce(null);
+      await service.getOverview({});
+      const readKeySecondCall = redis.get.mock.calls[redis.get.mock.calls.length - 1][0] as string;
+
+      expect(readKeySecondCall).toBe(writtenKey);
+    });
   });
 
   describe('exportCsv', () => {
