@@ -34,6 +34,9 @@ interface TxMock {
   $queryRaw: jest.Mock;
   $executeRaw: jest.Mock;
   completion: { update: jest.Mock };
+  user: { findUnique: jest.Mock };
+  moderationAction: { create: jest.Mock; update: jest.Mock };
+  appeal: { update: jest.Mock; findUniqueOrThrow: jest.Mock };
 }
 
 describe('ModerationService', () => {
@@ -65,11 +68,6 @@ describe('ModerationService', () => {
   let adminUsers: { suspend: jest.Mock; reactivate: jest.Mock };
 
   beforeEach(() => {
-    tx = {
-      $queryRaw: jest.fn(),
-      $executeRaw: jest.fn().mockResolvedValue(undefined),
-      completion: { update: jest.fn() },
-    };
     prisma = {
       $transaction: jest.fn((arg: unknown) =>
         Array.isArray(arg) ? Promise.all(arg) : (arg as (t: TxMock) => Promise<unknown>)(tx),
@@ -91,6 +89,23 @@ describe('ModerationService', () => {
         findUniqueOrThrow: jest.fn(),
       },
       user: { findUnique: jest.fn() },
+    };
+    // `createAction`/`decideAppeal` now run their user-state + moderationAction/appeal
+    // writes inside `prisma.$transaction(async (tx) => ...)` (Phase 10 atomicity fix —
+    // backend-eval D3-FAIL-1/D3-FAIL-2). Point `tx`'s model mocks at the SAME jest.fn()s
+    // as `prisma`'s so every existing `prisma.x.mockResolvedValue(...)` / `expect(prisma.x)`
+    // in this file keeps working regardless of whether the code under test reads/writes
+    // through `this.prisma` or the `tx` passed into its transaction callback.
+    tx = {
+      $queryRaw: jest.fn(),
+      $executeRaw: jest.fn().mockResolvedValue(undefined),
+      completion: { update: jest.fn() },
+      user: prisma.user,
+      moderationAction: {
+        create: prisma.moderationAction.create,
+        update: prisma.moderationAction.update,
+      },
+      appeal: { update: prisma.appeal.update, findUniqueOrThrow: prisma.appeal.findUniqueOrThrow },
     };
     audit = { record: jest.fn().mockResolvedValue(undefined) };
     storage = { getSignedDownloadUrl: jest.fn().mockResolvedValue('signed://url') };
@@ -370,7 +385,7 @@ describe('ModerationService', () => {
         CTX,
       );
 
-      expect(adminUsers.suspend).toHaveBeenCalledWith(USER_ID, { reason: 'bad' }, CTX);
+      expect(adminUsers.suspend).toHaveBeenCalledWith(USER_ID, { reason: 'bad' }, CTX, tx);
       expect(prisma.moderationAction.create).toHaveBeenCalled();
       expect(audit.record).toHaveBeenCalledWith(
         expect.objectContaining({ action: 'moderation.take_action' }),
@@ -415,7 +430,7 @@ describe('ModerationService', () => {
         CTX,
       );
 
-      expect(adminUsers.reactivate).toHaveBeenCalledWith(USER_ID, CTX);
+      expect(adminUsers.reactivate).toHaveBeenCalledWith(USER_ID, CTX, tx);
     });
 
     it('records a WarnUser action with no user-state side effect', async () => {
@@ -527,7 +542,7 @@ describe('ModerationService', () => {
         CTX,
       );
       expect(prisma.userTaskSubmission.findUnique).toHaveBeenCalled();
-      expect(adminUsers.suspend).toHaveBeenCalledWith(USER_ID, { reason: 'x' }, CTX);
+      expect(adminUsers.suspend).toHaveBeenCalledWith(USER_ID, { reason: 'x' }, CTX, tx);
     });
 
     it('honours an explicit targetUserId override and passes expiresAt through', async () => {
@@ -651,7 +666,7 @@ describe('ModerationService', () => {
         where: { id: ACTION_ID },
         data: { reversedAt: expect.any(Date) },
       });
-      expect(adminUsers.reactivate).toHaveBeenCalledWith(USER_ID, CTX);
+      expect(adminUsers.reactivate).toHaveBeenCalledWith(USER_ID, CTX, tx);
       expect(audit.record).toHaveBeenCalledWith(
         expect.objectContaining({ action: 'moderation.manage_appeals' }),
       );
