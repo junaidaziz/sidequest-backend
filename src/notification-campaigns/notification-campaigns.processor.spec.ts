@@ -42,7 +42,7 @@ describe('NotificationCampaignsProcessor', () => {
       updateMany: jest.Mock;
       count: jest.Mock;
     };
-    notificationPreference: { findUnique: jest.Mock };
+    notificationPreference: { findMany: jest.Mock };
   };
   let notifications: { notify: jest.Mock };
 
@@ -75,7 +75,7 @@ describe('NotificationCampaignsProcessor', () => {
         updateMany: jest.fn().mockResolvedValue({ count: 0 }),
         count: jest.fn().mockResolvedValue(0),
       },
-      notificationPreference: { findUnique: jest.fn().mockResolvedValue(null) },
+      notificationPreference: { findMany: jest.fn().mockResolvedValue([]) },
     };
     notifications = { notify: jest.fn().mockResolvedValue({ id: 'notif-1' }) };
 
@@ -120,9 +120,10 @@ describe('NotificationCampaignsProcessor', () => {
   });
 
   it('skips a recipient who has opted out of marketing (marketingEnabled = false)', async () => {
-    prisma.notificationPreference.findUnique
-      .mockResolvedValueOnce({ marketingEnabled: false }) // u1 opted out
-      .mockResolvedValueOnce({ marketingEnabled: true }); // u2 enabled
+    // The batched query only returns rows for recipients with an explicit
+    // marketingEnabled: false row — u1 opted out, u2 has no row (enabled by
+    // the absence-means-enabled convention) and so is never returned here.
+    prisma.notificationPreference.findMany.mockResolvedValue([{ userId: 'u1' }]);
 
     await processor.process(makeJob());
 
@@ -136,7 +137,7 @@ describe('NotificationCampaignsProcessor', () => {
   });
 
   it('treats an absent preference row as enabled (absence = enabled convention)', async () => {
-    prisma.notificationPreference.findUnique.mockResolvedValue(null);
+    prisma.notificationPreference.findMany.mockResolvedValue([]);
     await processor.process(makeJob());
     expect(notifications.notify).toHaveBeenCalledTimes(2);
   });
