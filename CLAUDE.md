@@ -77,7 +77,7 @@ Cross-cutting **reserve-then-execute** pattern, not the more common execute-then
 | POST | `/missions/:missionId/save` | JWT | idempotent bookmark |
 | DELETE | `/missions/:missionId/save` | JWT | idempotent unbookmark |
 | POST | `/missions/:missionId/proof` | JWT, multipart | photo or text proof; awards XP immediately; auto-approved after `PROOF_AUTO_APPROVE_TIMEOUT_HOURS` unless an admin resolves it first |
-| PATCH | `/admin/completions/:id/verification` | `x-admin-key` header | manual Approve/Reject override on a Pending completion |
+| PATCH | `/admin/proofs/:id/verification` | RBAC (`proofs.review`) | manual Approve/Reject override on a Pending completion — see the web-platform admin build below |
 | POST | `/tasks` | JWT | create a task/challenge |
 | GET | `/tasks` | JWT | list, filterable by `status`/`role` |
 | GET | `/tasks/summary` | JWT | dashboard counts |
@@ -132,7 +132,7 @@ Reused consistently wherever two concurrent requests could otherwise race a stat
 - CORS is an allow-list from `CORS_ALLOWED_ORIGINS`; unset fails closed (no cross-origin access) in production, permissive only in dev/test. Irrelevant to native mobile clients (no `Origin` header), relevant to the Expo web target.
 - Global `ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true })` — any request field outside a DTO's declared shape is a 400, not silently dropped.
 - `@nestjs/throttler` with Redis-backed storage; global default from `THROTTLE_TTL`/`THROTTLE_LIMIT`, tighter per-route overrides on sensitive endpoints (e.g. 5/60s on login/signup/google/password-change, 10/60s on guest creation, 20-30/60s on other side-effecting writes).
-- `AdminGuard` gates every `/admin/*` route behind a single shared `x-admin-key` header value (`ADMIN_API_KEY`) — **fail-closed**: an unset key denies every request with 403 rather than the app crashing at boot. There is no per-admin identity or RBAC in v1.
+- Admin routes are gated by a full RBAC system (`AdminJwtAuthGuard` + `PermissionGuard`, per-admin identity, roles/permissions/overrides) built as part of the web-platform admin portal. The earlier single shared `x-admin-key`/`AdminGuard`/`ADMIN_API_KEY` gate has been removed — every `/admin/*` route now requires an authenticated `AdminUser` with the relevant permission.
 - `app.enableShutdownHooks()` is required in `main.ts` — without it, a Railway SIGTERM on redeploy cuts in-flight requests and abandons BullMQ jobs instead of draining cleanly.
 - `requestLoggingMiddleware` only accepts an inbound `x-request-id` if it matches a UUID-ish shape (`/^[0-9a-f-]{1,64}$/i`); anything else (e.g. a CRLF log-injection attempt) is discarded in favor of a freshly generated id.
 - Stripe errors are mapped by `StripeService.wrap()` to specific HTTP statuses (resource_missing→404, card errors→400 with Stripe's own safe message, rate-limit→503, auth/connection failures→502) so raw Stripe SDK internals never leak to the client.
@@ -153,7 +153,6 @@ STRIPE_WEBHOOK_SECRET                     # RESERVED — not read anywhere in co
 EXPO_ACCESS_TOKEN                         # optional — Expo push service auth
 PUSH_RECEIPT_CHECK_DELAY_MINUTES          # optional, default 15
 PROOF_AUTO_APPROVE_TIMEOUT_HOURS          # optional, default 24
-ADMIN_API_KEY                             # shared secret for the x-admin-key header — unset = every /admin/* request 403s
 ```
 
 Never paste real values for any of these into chat, including to an AI assistant — set them directly via `railway variables set` (production) or a local `.env` (gitignored). `STRIPE_SECRET_KEY` in particular: if `POST /payment/setup-intent` (or any payment endpoint) returns `502 Payment provider is currently unavailable`, that's this key being unset/placeholder in the target environment, not a code bug — check Railway before debugging the payment module's code. The publishable-key counterpart (`EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY`) lives on the mobile side and is *not* secret (see `mobileApp/CLAUDE.md`).
