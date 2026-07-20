@@ -74,6 +74,39 @@ export class AdminMeDto extends AdminUserDto {
   mfaEnrollmentRequired!: boolean;
 }
 
+/**
+ * A single per-admin permission override, as returned by the override endpoints.
+ * `permissionKey` is the stable catalog key (never the internal permission id).
+ * `effect` GRANT adds the permission; REVOKE subtracts it even if the role grants
+ * it. Absence of an override row for a permission means "defer to the role" — a
+ * distinct state from a REVOKE row.
+ */
+export class PermissionOverrideDto {
+  @ApiProperty()
+  id!: string;
+
+  @ApiProperty({ description: 'The admin this override applies to' })
+  adminUserId!: string;
+
+  @ApiProperty({ description: 'Stable catalog permission key, e.g. "users.suspend"' })
+  permissionKey!: string;
+
+  @ApiProperty({ enum: ['GRANT', 'REVOKE'] })
+  effect!: string;
+
+  @ApiProperty({ nullable: true, description: 'Optional justification captured at write time' })
+  reason!: string | null;
+
+  @ApiProperty({ nullable: true, description: 'Admin id that last set this override, if known' })
+  grantedByAdminId!: string | null;
+
+  @ApiProperty()
+  createdAt!: Date;
+
+  @ApiProperty()
+  updatedAt!: Date;
+}
+
 /** A role plus its permission set. */
 export class RoleDto {
   @ApiProperty()
