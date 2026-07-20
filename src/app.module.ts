@@ -31,6 +31,7 @@ import { AppConfigModule } from './app-config/app-config.module';
 import { AdminChallengesModule } from './admin-challenges/admin-challenges.module';
 import { ModerationModule } from './moderation/moderation.module';
 import { NotificationCampaignsModule } from './notification-campaigns/notification-campaigns.module';
+import { AnalyticsModule } from './analytics/analytics.module';
 
 /**
  * `Number(...)` of a non-numeric env value silently produces NaN, which would
@@ -126,6 +127,11 @@ function bullConnectionFromRedisUrl(redisUrl: string): {
     // send/schedule/cancel, fanned out via the app's third BullMQ queue
     // (`campaigns`), reusing NotificationsService.notify() per recipient.
     NotificationCampaignsModule,
+    // Phase 12 — admin analytics dashboard: read-only KPI aggregates (users,
+    // completions, backlog, moderation, level/activation, device tokens, campaign
+    // rollup, live BullMQ queue depth, recent admin activity) + CSV export, behind
+    // a short best-effort Redis cache. No new queue/schema/permission is added.
+    AnalyticsModule,
   ],
   controllers: [AppController],
   providers: [
