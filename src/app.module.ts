@@ -29,6 +29,7 @@ import { RbacModule } from './rbac/rbac.module';
 import { CmsModule } from './cms/cms.module';
 import { AppConfigModule } from './app-config/app-config.module';
 import { AdminChallengesModule } from './admin-challenges/admin-challenges.module';
+import { ModerationModule } from './moderation/moderation.module';
 
 /**
  * `Number(...)` of a non-numeric env value silently produces NaN, which would
@@ -117,6 +118,9 @@ function bullConnectionFromRedisUrl(redisUrl: string): {
     AppConfigModule,
     // Phase 9 — admin challenge (Mission) authoring: CRUD + publish/archive/etc.
     AdminChallengesModule,
+    // Phase 10 — moderation queue + Report/ModerationAction/Appeal workflow, and
+    // the RBAC-gated proof-review route replacing the legacy AdminGuard route.
+    ModerationModule,
   ],
   controllers: [AppController],
   providers: [
