@@ -97,13 +97,20 @@ export class AdminUsersService {
    * and revokes the refresh token so the user cannot rotate into a fresh access
    * token — combined with the JwtStrategy `suspendedAt` check, their existing
    * access token stops working on its very next request.
+   *
+   * Accepts an optional `tx` so a caller that needs this state change atomic with
+   * its own writes (e.g. `ModerationService.createAction` recording the
+   * `ModerationAction` row a suspension was taken under) can enlist it in their
+   * own `prisma.$transaction` instead of this running on its own connection.
    */
   async suspend(
     userId: string,
     dto: SuspendUserDto,
     ctx: AdminUserActionContext,
+    tx?: Prisma.TransactionClient,
   ): Promise<AdminUserDetailDto> {
-    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    const db = tx ?? this.prisma;
+    const user = await db.user.findUnique({ where: { id: userId } });
     if (!user) {
       throw new NotFoundException('User not found');
     }
@@ -114,7 +121,7 @@ export class AdminUsersService {
       throw new ConflictException('Account is already suspended');
     }
 
-    const updated = await this.prisma.user.update({
+    const updated = await db.user.update({
       where: { id: userId },
       data: {
         suspendedAt: new Date(),
@@ -131,12 +138,20 @@ export class AdminUsersService {
       reason: dto.reason,
     });
     this.logger.log(`User ${userId} suspended by admin ${ctx.actorAdminUserId}`);
-    return this.buildDetail(updated);
+    return this.buildDetail(updated, tx);
   }
 
-  /** Lifts a suspension. The user re-authenticates (refresh token was revoked). */
-  async reactivate(userId: string, ctx: AdminUserActionContext): Promise<AdminUserDetailDto> {
-    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+  /**
+   * Lifts a suspension. The user re-authenticates (refresh token was revoked).
+   * Accepts an optional `tx` — see `suspend()`'s doc comment.
+   */
+  async reactivate(
+    userId: string,
+    ctx: AdminUserActionContext,
+    tx?: Prisma.TransactionClient,
+  ): Promise<AdminUserDetailDto> {
+    const db = tx ?? this.prisma;
+    const user = await db.user.findUnique({ where: { id: userId } });
     if (!user) {
       throw new NotFoundException('User not found');
     }
@@ -144,7 +159,7 @@ export class AdminUsersService {
       throw new ConflictException('Account is not suspended');
     }
 
-    const updated = await this.prisma.user.update({
+    const updated = await db.user.update({
       where: { id: userId },
       data: { suspendedAt: null, suspensionReason: null, suspendedByAdminId: null },
     });
@@ -154,7 +169,7 @@ export class AdminUsersService {
       reason: 'reactivated',
     });
     this.logger.log(`User ${userId} reactivated by admin ${ctx.actorAdminUserId}`);
-    return this.buildDetail(updated);
+    return this.buildDetail(updated, tx);
   }
 
   /** Replaces the user's feature-restriction set with exactly `dto.features`. */
@@ -376,31 +391,37 @@ export class AdminUsersService {
     };
   }
 
-  private async buildDetail(user: User): Promise<AdminUserDetailDto> {
+  /** Accepts an optional `tx` so a read immediately after a `suspend()`/`reactivate()`
+   *  called with the same `tx` sees that write rather than a stale pre-commit row. */
+  private async buildDetail(
+    user: User,
+    tx?: Prisma.TransactionClient,
+  ): Promise<AdminUserDetailDto> {
+    const db = tx ?? this.prisma;
     const [completions, createdTasks, assignedTasks, reportsAgainst, actionsAgainst] =
       await Promise.all([
-        this.prisma.completion.findMany({
+        db.completion.findMany({
           where: { userId: user.id },
           orderBy: { completedAt: 'desc' },
           take: HISTORY_LIMIT,
           include: { mission: { select: { title: true } } },
         }),
-        this.prisma.userTask.findMany({
+        db.userTask.findMany({
           where: { creatorId: user.id },
           orderBy: { createdAt: 'desc' },
           take: HISTORY_LIMIT,
         }),
-        this.prisma.userTask.findMany({
+        db.userTask.findMany({
           where: { assigneeId: user.id },
           orderBy: { createdAt: 'desc' },
           take: HISTORY_LIMIT,
         }),
-        this.prisma.report.findMany({
+        db.report.findMany({
           where: { targetType: 'User', targetId: user.id, deletedAt: null },
           orderBy: { createdAt: 'desc' },
           take: HISTORY_LIMIT,
         }),
-        this.prisma.moderationAction.findMany({
+        db.moderationAction.findMany({
           where: { targetUserId: user.id },
           orderBy: { createdAt: 'desc' },
           take: HISTORY_LIMIT,
