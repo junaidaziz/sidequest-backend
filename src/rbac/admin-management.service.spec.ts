@@ -42,9 +42,29 @@ function adminRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function recoveryAdmin(overrides: Record<string, unknown> = {}) {
+  return {
+    role: {
+      permissions: [
+        { permission: { key: 'admins.manage' } },
+        { permission: { key: 'roles.assign' } },
+        { permission: { key: 'permissions.assign' } },
+      ],
+    },
+    permissionOverrides: [],
+    ...overrides,
+  };
+}
+
 describe('AdminManagementService', () => {
   let prisma: {
-    adminUser: { findMany: jest.Mock; findFirst: jest.Mock; create: jest.Mock; update: jest.Mock };
+    adminUser: {
+      findMany: jest.Mock;
+      findFirst: jest.Mock;
+      create: jest.Mock;
+      update: jest.Mock;
+      count: jest.Mock;
+    };
     adminSession: { updateMany: jest.Mock };
     role: { findUnique: jest.Mock };
     permission: { findUnique: jest.Mock };
@@ -74,6 +94,7 @@ describe('AdminManagementService', () => {
         findFirst: jest.fn(),
         create: jest.fn(),
         update: jest.fn(),
+        count: jest.fn(),
       },
       adminSession: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
       role: { findUnique: jest.fn() },
@@ -84,7 +105,12 @@ describe('AdminManagementService', () => {
         upsert: jest.fn(),
         delete: jest.fn().mockResolvedValue({}),
       },
-      $transaction: jest.fn().mockResolvedValue([adminRow({ status: 'Suspended' }), { count: 1 }]),
+      $transaction: jest.fn().mockImplementation(async (input: unknown) => {
+        if (typeof input === 'function') {
+          return (input as (tx: typeof prisma) => unknown)(prisma);
+        }
+        return [adminRow({ status: 'Suspended' }), { count: 1 }];
+      }),
     };
     audit = { record: jest.fn().mockResolvedValue(undefined) };
     email = { sendAdminInvite: jest.fn() };
@@ -104,6 +130,7 @@ describe('AdminManagementService', () => {
       resolver as unknown as PermissionResolverService,
       { get: () => undefined } as unknown as ConfigService,
     );
+    prisma.adminUser.findMany.mockResolvedValue([recoveryAdmin()]);
   });
 
   describe('list / get', () => {
@@ -200,6 +227,83 @@ describe('AdminManagementService', () => {
       await service.update(ACTOR, 'admin-2', { displayName: 'New' }, CTX);
       expect(resolver.bumpRoleVersion).not.toHaveBeenCalled();
     });
+
+    it('prevents demoting the last active Owner', async () => {
+      prisma.adminUser.findFirst.mockResolvedValue(
+        adminRow({ role: { id: 'role-owner', key: 'owner', mfaRequired: true } }),
+      );
+      resolver.hasAll.mockResolvedValue(true);
+      prisma.role.findUnique.mockResolvedValue({ id: 'role-9' });
+      prisma.$transaction.mockImplementation(async (callback: (tx: typeof prisma) => unknown) => {
+        prisma.adminUser.count.mockResolvedValue(0);
+        return callback(prisma);
+      });
+
+      await expect(service.update(ACTOR, 'admin-2', { roleId: 'role-9' }, CTX)).rejects.toThrow(
+        'At least one active Owner must remain',
+      );
+      expect(prisma.adminUser.update).not.toHaveBeenCalled();
+    });
+
+    it('allows demoting an Owner when another active Owner remains', async () => {
+      prisma.adminUser.findFirst.mockResolvedValue(
+        adminRow({ role: { id: 'role-owner', key: 'owner', mfaRequired: true } }),
+      );
+      resolver.hasAll.mockResolvedValue(true);
+      prisma.role.findUnique.mockResolvedValue({ id: 'role-9' });
+      prisma.adminUser.update.mockResolvedValue(
+        adminRow({ roleId: 'role-9', role: { id: 'role-9', key: 'support_agent' } }),
+      );
+      prisma.$transaction.mockImplementation(async (callback: (tx: typeof prisma) => unknown) => {
+        prisma.adminUser.count.mockResolvedValue(1);
+        return callback(prisma);
+      });
+
+      await service.update(ACTOR, 'admin-2', { roleId: 'role-9' }, CTX);
+      expect(prisma.adminUser.update).toHaveBeenCalled();
+    });
+
+    it('rejects demoting a recovery Owner when the other Owner is critically revoked', async () => {
+      prisma.adminUser.findFirst.mockResolvedValue(
+        adminRow({ role: { id: 'role-owner', key: 'owner', mfaRequired: true } }),
+      );
+      resolver.hasAll.mockResolvedValue(true);
+      prisma.role.findUnique.mockResolvedValue({ id: 'role-9' });
+      prisma.adminUser.count.mockResolvedValue(1);
+      prisma.adminUser.update.mockResolvedValue(
+        adminRow({ roleId: 'role-9', role: { id: 'role-9', key: 'support_agent' } }),
+      );
+      prisma.adminUser.findMany.mockResolvedValue([
+        recoveryAdmin({
+          permissionOverrides: [{ effect: 'REVOKE', permission: { key: 'permissions.assign' } }],
+        }),
+      ]);
+
+      await expect(service.update(ACTOR, 'admin-2', { roleId: 'role-9' }, CTX)).rejects.toThrow(
+        'At least one active admin with recovery authority must remain',
+      );
+    });
+
+    it('rejects reassigning the last custom-role recovery admin to a non-recovery role', async () => {
+      prisma.adminUser.findFirst.mockResolvedValue(
+        adminRow({ role: { id: 'role-recovery', key: 'recovery_operator', mfaRequired: true } }),
+      );
+      resolver.hasAll.mockResolvedValue(true);
+      prisma.role.findUnique.mockResolvedValue({ id: 'role-9' });
+      prisma.adminUser.update.mockResolvedValue(
+        adminRow({ roleId: 'role-9', role: { id: 'role-9', key: 'support_agent' } }),
+      );
+      prisma.adminUser.findMany.mockResolvedValue([
+        {
+          role: { permissions: [{ permission: { key: 'admins.manage' } }] },
+          permissionOverrides: [],
+        },
+      ]);
+
+      await expect(service.update(ACTOR, 'admin-2', { roleId: 'role-9' }, CTX)).rejects.toThrow(
+        'At least one active admin with recovery authority must remain',
+      );
+    });
   });
 
   describe('disable', () => {
@@ -216,9 +320,41 @@ describe('AdminManagementService', () => {
 
     it('suspends and revokes sessions', async () => {
       prisma.adminUser.findFirst.mockResolvedValue(adminRow());
+      prisma.adminUser.update.mockResolvedValue(adminRow({ status: 'Suspended' }));
       const res = await service.disable(ACTOR, 'admin-2', CTX);
       expect(res.status).toBe('Suspended');
       expect(prisma.$transaction).toHaveBeenCalled();
+    });
+
+    it('prevents disabling the last active Owner', async () => {
+      prisma.adminUser.findFirst.mockResolvedValue(
+        adminRow({ role: { id: 'role-owner', key: 'owner', mfaRequired: true } }),
+      );
+      prisma.$transaction.mockImplementation(async (callback: (tx: typeof prisma) => unknown) => {
+        prisma.adminUser.count.mockResolvedValue(0);
+        return callback(prisma);
+      });
+
+      await expect(service.disable(ACTOR, 'admin-2', CTX)).rejects.toThrow(
+        'At least one active Owner must remain',
+      );
+    });
+
+    it('rejects disabling a recovery Owner when the other Owner is critically revoked', async () => {
+      prisma.adminUser.findFirst.mockResolvedValue(
+        adminRow({ role: { id: 'role-owner', key: 'owner', mfaRequired: true } }),
+      );
+      prisma.adminUser.count.mockResolvedValue(1);
+      prisma.adminUser.update.mockResolvedValue(adminRow({ status: 'Suspended' }));
+      prisma.adminUser.findMany.mockResolvedValue([
+        recoveryAdmin({
+          permissionOverrides: [{ effect: 'REVOKE', permission: { key: 'permissions.assign' } }],
+        }),
+      ]);
+
+      await expect(service.disable(ACTOR, 'admin-2', CTX)).rejects.toThrow(
+        'At least one active admin with recovery authority must remain',
+      );
     });
   });
 
@@ -352,6 +488,63 @@ describe('AdminManagementService', () => {
           }),
         );
       });
+
+      it('prevents revoking critical authority from the last recovery admin', async () => {
+        const critical = { id: 'perm-critical', key: 'permissions.assign' };
+        prisma.adminUser.findFirst.mockResolvedValue({ id: 'admin-2' });
+        prisma.permission.findUnique.mockResolvedValue(critical);
+        prisma.adminUserPermissionOverride.findUnique.mockResolvedValue(null);
+        prisma.adminUserPermissionOverride.upsert.mockResolvedValue(
+          overrideRow({ permissionId: critical.id, effect: 'REVOKE' }),
+        );
+        prisma.adminUser.findMany.mockResolvedValue([
+          {
+            role: {
+              permissions: [
+                { permission: { key: 'admins.manage' } },
+                { permission: { key: 'roles.assign' } },
+                { permission: { key: 'permissions.assign' } },
+              ],
+            },
+            permissionOverrides: [{ effect: 'REVOKE', permission: { key: 'permissions.assign' } }],
+          },
+        ]);
+
+        await expect(
+          service.upsertOverride(ACTOR, 'admin-2', 'permissions.assign', { effect: 'REVOKE' }, CTX),
+        ).rejects.toThrow('At least one active admin with recovery authority must remain');
+      });
+
+      it('allows a critical revocation when another recovery admin remains', async () => {
+        const critical = { id: 'perm-critical', key: 'permissions.assign' };
+        prisma.adminUser.findFirst.mockResolvedValue({ id: 'admin-2' });
+        prisma.permission.findUnique.mockResolvedValue(critical);
+        prisma.adminUserPermissionOverride.findUnique.mockResolvedValue(null);
+        prisma.adminUserPermissionOverride.upsert.mockResolvedValue(
+          overrideRow({ permissionId: critical.id, effect: 'REVOKE' }),
+        );
+        prisma.adminUser.findMany.mockResolvedValue([
+          {
+            role: {
+              permissions: [
+                { permission: { key: 'admins.manage' } },
+                { permission: { key: 'roles.assign' } },
+                { permission: { key: 'permissions.assign' } },
+              ],
+            },
+            permissionOverrides: [],
+          },
+        ]);
+
+        await service.upsertOverride(
+          ACTOR,
+          'admin-2',
+          'permissions.assign',
+          { effect: 'REVOKE' },
+          CTX,
+        );
+        expect(resolver.bumpRoleVersion).toHaveBeenCalled();
+      });
     });
 
     describe('removeOverride', () => {
@@ -394,6 +587,30 @@ describe('AdminManagementService', () => {
         expect(audit.record).toHaveBeenCalledWith(
           expect.objectContaining({ action: 'permissions.assign' }),
         );
+      });
+
+      it('prevents removing a critical GRANT from the last recovery admin', async () => {
+        const critical = { id: 'perm-critical', key: 'permissions.assign' };
+        prisma.adminUser.findFirst.mockResolvedValue({ id: 'admin-2' });
+        prisma.permission.findUnique.mockResolvedValue(critical);
+        prisma.adminUserPermissionOverride.findUnique.mockResolvedValue(
+          overrideRow({ permissionId: critical.id, effect: 'GRANT' }),
+        );
+        prisma.adminUser.findMany.mockResolvedValue([
+          {
+            role: {
+              permissions: [
+                { permission: { key: 'admins.manage' } },
+                { permission: { key: 'roles.assign' } },
+              ],
+            },
+            permissionOverrides: [],
+          },
+        ]);
+
+        await expect(
+          service.removeOverride(ACTOR, 'admin-2', 'permissions.assign', CTX),
+        ).rejects.toThrow('At least one active admin with recovery authority must remain');
       });
     });
   });

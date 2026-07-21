@@ -5,6 +5,9 @@ import { ExtractJwt, Strategy } from 'passport-jwt';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AdminJwtPayload, AdminTokenType, AuthAdmin } from '../types/admin-jwt-payload.interface';
 
+/** Avoid turning every authenticated read into a session-row write. */
+const SESSION_ACTIVITY_TOUCH_INTERVAL_MS = 5 * 60 * 1000;
+
 /**
  * Second, separately-named Passport strategy ('admin-jwt') registered ALONGSIDE
  * the existing unnamed 'jwt' strategy — zero collision, own secret, own payload.
@@ -59,10 +62,18 @@ export class AdminJwtStrategy extends PassportStrategy(Strategy, 'admin-jwt') {
       throw new UnauthorizedException('Admin account is locked');
     }
 
-    // Touch lastUsedAt best-effort (device/login history) — never block the
-    // request on this write.
+    // Touch lastUsedAt best-effort, at most once per five-minute activity
+    // window. The conditional update is concurrency-safe: a burst of parallel
+    // requests can produce at most one effective row change.
+    const activityCutoff = new Date(Date.now() - SESSION_ACTIVITY_TOUCH_INTERVAL_MS);
     this.prisma.adminSession
-      .update({ where: { id: session.id }, data: { lastUsedAt: new Date() } })
+      .updateMany({
+        where: {
+          id: session.id,
+          OR: [{ lastUsedAt: null }, { lastUsedAt: { lt: activityCutoff } }],
+        },
+        data: { lastUsedAt: new Date() },
+      })
       .catch(() => undefined);
 
     return {

@@ -114,10 +114,16 @@ export class AdminMfaService {
     });
     for (const candidate of candidates) {
       if (await bcrypt.compare(normalized, candidate.codeHash)) {
-        await this.prisma.adminMfaRecoveryCode.update({
-          where: { id: candidate.id },
+        // Claim the code with a compare-and-set. Two concurrent login requests
+        // may both have read the same unused row above; only one is allowed to
+        // transition it from unused -> used.
+        const claimed = await this.prisma.adminMfaRecoveryCode.updateMany({
+          where: { id: candidate.id, usedAt: null },
           data: { usedAt: new Date() },
         });
+        if (claimed.count !== 1) {
+          continue;
+        }
         this.logger.log(`Recovery code consumed for admin ${adminUserId}`);
         return true;
       }

@@ -22,6 +22,9 @@ import { UpdateAdminDto } from './dto/update-admin.dto';
 import { UpsertPermissionOverrideDto } from './dto/upsert-permission-override.dto';
 import { PermissionResolverService } from './permission-resolver.service';
 
+/** Losing all three makes the admin organization unable to restore its own RBAC state. */
+const RECOVERY_PERMISSION_KEYS = ['admins.manage', 'roles.assign', 'permissions.assign'] as const;
+
 /**
  * Admin user management (invite / view / edit / disable / reset-mfa /
  * revoke-sessions). Every mutation writes an audit entry. Role reassignment is
@@ -172,14 +175,31 @@ export class AdminManagementService {
       }
     }
 
-    const updated = await this.prisma.adminUser.update({
-      where: { id },
-      data: {
-        displayName: dto.displayName ?? undefined,
-        roleId: roleChanging ? dto.roleId : undefined,
-      },
-      include: { role: true },
-    });
+    const updateData = {
+      displayName: dto.displayName ?? undefined,
+      roleId: roleChanging ? dto.roleId : undefined,
+    };
+    const updated = roleChanging
+      ? await this.prisma.$transaction(
+          async (tx) => {
+            if (existing.role.key === 'owner') {
+              await this.assertAnotherActiveOwner(tx, id);
+            }
+            const changed = await tx.adminUser.update({
+              where: { id },
+              data: updateData,
+              include: { role: true },
+            });
+            await this.assertRecoveryAuthorityRemains(tx);
+            return changed;
+          },
+          { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+        )
+      : await this.prisma.adminUser.update({
+          where: { id },
+          data: updateData,
+          include: { role: true },
+        });
 
     // A role change alters this admin's effective permission set — invalidate cache.
     if (roleChanging) {
@@ -214,17 +234,25 @@ export class AdminManagementService {
       throw new NotFoundException('Admin not found');
     }
 
-    const [updated] = await this.prisma.$transaction([
-      this.prisma.adminUser.update({
-        where: { id },
-        data: { status: 'Suspended' },
-        include: { role: true },
-      }),
-      this.prisma.adminSession.updateMany({
-        where: { adminUserId: id, revokedAt: null },
-        data: { revokedAt: new Date() },
-      }),
-    ]);
+    const updated = await this.prisma.$transaction(
+      async (tx) => {
+        if (existing.role.key === 'owner') {
+          await this.assertAnotherActiveOwner(tx, id);
+        }
+        const suspended = await tx.adminUser.update({
+          where: { id },
+          data: { status: 'Suspended' },
+          include: { role: true },
+        });
+        await tx.adminSession.updateMany({
+          where: { adminUserId: id, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+        await this.assertRecoveryAuthorityRemains(tx);
+        return suspended;
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
 
     await this.audit.record({
       actorAdminUserId: actor.adminUserId,
@@ -351,21 +379,34 @@ export class AdminManagementService {
       where: { adminUserId_permissionId: { adminUserId: adminId, permissionId: permission.id } },
     });
 
-    const override = await this.prisma.adminUserPermissionOverride.upsert({
-      where: { adminUserId_permissionId: { adminUserId: adminId, permissionId: permission.id } },
-      create: {
-        adminUserId: adminId,
-        permissionId: permission.id,
-        effect: dto.effect,
-        reason: dto.reason ?? null,
-        grantedByAdminId: actor.adminUserId,
-      },
-      update: {
-        effect: dto.effect,
-        reason: dto.reason ?? null,
-        grantedByAdminId: actor.adminUserId,
-      },
-    });
+    const writeOverride = (tx: Prisma.TransactionClient | PrismaService) =>
+      tx.adminUserPermissionOverride.upsert({
+        where: { adminUserId_permissionId: { adminUserId: adminId, permissionId: permission.id } },
+        create: {
+          adminUserId: adminId,
+          permissionId: permission.id,
+          effect: dto.effect,
+          reason: dto.reason ?? null,
+          grantedByAdminId: actor.adminUserId,
+        },
+        update: {
+          effect: dto.effect,
+          reason: dto.reason ?? null,
+          grantedByAdminId: actor.adminUserId,
+        },
+      });
+
+    const override =
+      dto.effect === 'REVOKE' && this.isRecoveryPermission(permissionKey)
+        ? await this.prisma.$transaction(
+            async (tx) => {
+              const changed = await writeOverride(tx);
+              await this.assertRecoveryAuthorityRemains(tx);
+              return changed;
+            },
+            { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+          )
+        : await writeOverride(this.prisma);
 
     // The override changes this admin's effective permission set — invalidate the
     // Redis-cached set exactly as role/permission edits do (role.service mirror).
@@ -427,7 +468,17 @@ export class AdminManagementService {
       return { removed: false };
     }
 
-    await this.prisma.adminUserPermissionOverride.delete({ where: { id: existing.id } });
+    if (existing.effect === 'GRANT' && this.isRecoveryPermission(permissionKey)) {
+      await this.prisma.$transaction(
+        async (tx) => {
+          await tx.adminUserPermissionOverride.delete({ where: { id: existing.id } });
+          await this.assertRecoveryAuthorityRemains(tx);
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      );
+    } else {
+      await this.prisma.adminUserPermissionOverride.delete({ where: { id: existing.id } });
+    }
     await this.resolver.bumpRoleVersion();
 
     await this.audit.record({
@@ -459,6 +510,69 @@ export class AdminManagementService {
       createdAt: override.createdAt,
       updatedAt: override.updatedAt,
     };
+  }
+
+  /**
+   * Enforces the organization-recovery invariant while running inside a
+   * SERIALIZABLE transaction. Concurrent attempts to remove two Owners cannot
+   * both commit: PostgreSQL aborts one serialization when each transaction's
+   * decision depended on the other's still-active row.
+   */
+  private async assertAnotherActiveOwner(
+    tx: Prisma.TransactionClient,
+    excludedAdminId: string,
+  ): Promise<void> {
+    const remaining = await tx.adminUser.count({
+      where: {
+        id: { not: excludedAdminId },
+        deletedAt: null,
+        status: 'Active',
+        role: { key: 'owner', deletedAt: null },
+      },
+    });
+    if (remaining === 0) {
+      throw new BadRequestException('At least one active Owner must remain');
+    }
+  }
+
+  /**
+   * Checks effective permissions from the transaction snapshot rather than the
+   * Redis cache. SERIALIZABLE isolation prevents two concurrent revocations
+   * from each observing the other administrator as a viable recovery principal.
+   */
+  private async assertRecoveryAuthorityRemains(tx: Prisma.TransactionClient): Promise<void> {
+    const admins = await tx.adminUser.findMany({
+      where: { deletedAt: null, status: 'Active' },
+      select: {
+        role: {
+          select: {
+            permissions: { select: { permission: { select: { key: true } } } },
+          },
+        },
+        permissionOverrides: {
+          select: { effect: true, permission: { select: { key: true } } },
+        },
+      },
+    });
+
+    const hasRecoveryAdmin = admins.some((admin) => {
+      const effective = new Set(admin.role.permissions.map((entry) => entry.permission.key));
+      for (const override of admin.permissionOverrides) {
+        if (override.effect === 'GRANT') effective.add(override.permission.key);
+        else effective.delete(override.permission.key);
+      }
+      return RECOVERY_PERMISSION_KEYS.every((key) => effective.has(key));
+    });
+
+    if (!hasRecoveryAdmin) {
+      throw new BadRequestException(
+        'At least one active admin with recovery authority must remain',
+      );
+    }
+  }
+
+  private isRecoveryPermission(permissionKey: string): boolean {
+    return (RECOVERY_PERMISSION_KEYS as readonly string[]).includes(permissionKey);
   }
 
   private toDto(admin: AdminUser, role: Role): AdminUserDto {

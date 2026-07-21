@@ -26,7 +26,7 @@ describe('AdminMfaService', () => {
       deleteMany: jest.Mock;
       createMany: jest.Mock;
       findMany: jest.Mock;
-      update: jest.Mock;
+      updateMany: jest.Mock;
     };
     $transaction: jest.Mock;
   };
@@ -39,7 +39,7 @@ describe('AdminMfaService', () => {
         deleteMany: jest.fn(),
         createMany: jest.fn(),
         findMany: jest.fn(),
-        update: jest.fn(),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
       $transaction: jest.fn().mockResolvedValue([]),
     };
@@ -113,10 +113,20 @@ describe('AdminMfaService', () => {
       prisma.adminMfaRecoveryCode.findMany.mockResolvedValue([{ id: 'rc-1', codeHash: stored }]);
       const ok = await service.verifyLoginCode(admin, 'ABCD-EF12-3456');
       expect(ok).toBe(true);
-      expect(prisma.adminMfaRecoveryCode.update).toHaveBeenCalledWith({
-        where: { id: 'rc-1' },
+      expect(prisma.adminMfaRecoveryCode.updateMany).toHaveBeenCalledWith({
+        where: { id: 'rc-1', usedAt: null },
         data: { usedAt: expect.any(Date) },
       });
+    });
+
+    it('rejects a recovery code that another concurrent request already claimed', async () => {
+      const admin = baseAdmin({ mfaSecret: crypto.encrypt(secret), mfaEnabledAt: new Date() });
+      const bcrypt = await import('bcrypt');
+      const stored = await bcrypt.hash('abcdef123456', 4);
+      prisma.adminMfaRecoveryCode.findMany.mockResolvedValue([{ id: 'rc-1', codeHash: stored }]);
+      prisma.adminMfaRecoveryCode.updateMany.mockResolvedValue({ count: 0 });
+
+      expect(await service.verifyLoginCode(admin, 'ABCD-EF12-3456')).toBe(false);
     });
 
     it('returns false when no recovery code matches', async () => {

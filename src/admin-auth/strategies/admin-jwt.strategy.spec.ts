@@ -28,14 +28,14 @@ function session(overrides: Record<string, unknown> = {}) {
 }
 
 describe('AdminJwtStrategy', () => {
-  let prisma: { adminSession: { findUnique: jest.Mock; update: jest.Mock } };
+  let prisma: { adminSession: { findUnique: jest.Mock; updateMany: jest.Mock } };
   let strategy: AdminJwtStrategy;
 
   beforeEach(() => {
     prisma = {
       adminSession: {
         findUnique: jest.fn(),
-        update: jest.fn().mockResolvedValue({}),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
     };
     strategy = new AdminJwtStrategy(config, prisma as unknown as PrismaService);
@@ -92,5 +92,12 @@ describe('AdminJwtStrategy', () => {
     expect(result.adminUserId).toBe('admin-1');
     expect(result.sessionId).toBe('session-1');
     expect(result.mfaPending).toBe(true);
+    expect(prisma.adminSession.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: 'session-1',
+        OR: [{ lastUsedAt: null }, { lastUsedAt: { lt: expect.any(Date) } }],
+      },
+      data: { lastUsedAt: expect.any(Date) },
+    });
   });
 });
