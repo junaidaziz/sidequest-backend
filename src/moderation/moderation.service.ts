@@ -11,6 +11,7 @@ import {
   ModerationTargetType,
   Prisma,
   ReportStatus,
+  TaskSubmissionStatus,
   VerificationStatus,
 } from '@prisma/client';
 import { AdminUsersService } from '../admin/admin-users.service';
@@ -58,9 +59,24 @@ interface LockedCompletionRow {
   verificationStatus: VerificationStatus;
 }
 
-/** Intermediate queue row carrying the raw S3 key, before presigning the sliced page. */
-interface RawQueueItem extends Omit<ModerationQueueItemDto, 'proofUrl'> {
+/**
+ * Shape of a single row returned by the merged `UNION ALL` queue query, before the
+ * proof key is presigned into a URL. Enum-typed columns come back as their text
+ * value (cast in SQL so both branches share a column type across the UNION).
+ */
+interface RawQueueRow {
+  source: ModerationQueueSource;
+  id: string;
+  targetType: ModerationTargetType;
+  submittedById: string;
+  submitterDisplayName: string | null;
+  title: string;
+  status: VerificationStatus | TaskSubmissionStatus;
+  proofType: ModerationQueueItemDto['proofType'];
+  proofText: string | null;
   proofKey: string | null;
+  xpAwarded: number | null;
+  submittedAt: Date;
 }
 
 /**
@@ -98,17 +114,27 @@ export class ModerationService {
 
   /**
    * Merged, paginated view of pending `Completion` proofs and pending
-   * `UserTaskSubmission` evidence. Because the two live in separate tables, each is
-   * fetched up to the requested page boundary, merged, ordered by submission time
-   * desc, and sliced — so a single page is a correct interleave of both sources.
+   * `UserTaskSubmission` evidence.
+   *
+   * The two sources live in separate tables, so the merge is done in one raw
+   * `UNION ALL` query (following this codebase's raw-SQL convention, already used
+   * for the row-locking `$queryRaw` below) with the `ORDER BY submittedAt DESC` and
+   * the `LIMIT`/`OFFSET` pushed down to Postgres. Only the requested page (exactly
+   * `pageSize` rows) crosses the wire and is hydrated/presigned, regardless of how
+   * deep the page is — replacing the previous approach, which fetched
+   * `page * pageSize` rows from *each* table into the Node process and sorted/sliced
+   * them in memory (fetch cost grew linearly with page depth; a deep page threw away
+   * almost everything it loaded). The composite `[status, submittedAt]` index on
+   * `UserTaskSubmission` (and the existing `verificationStatus` index on
+   * `Completion`) lets each UNION branch produce its rows already ordered.
    */
   async getQueue(query: ModerationQueueQueryDto): Promise<ModerationQueuePageDto> {
     const page = query.page ?? 1;
     const pageSize = query.pageSize ?? 25;
+    const skip = (page - 1) * pageSize;
     const includeCompletions = !query.source || query.source === ModerationQueueSource.Completion;
     const includeSubmissions =
       !query.source || query.source === ModerationQueueSource.TaskSubmission;
-    const upTo = page * pageSize;
 
     const [pendingCompletions, pendingTaskSubmissions] = await Promise.all([
       includeCompletions
@@ -121,70 +147,79 @@ export class ModerationService {
         : Promise.resolve(0),
     ]);
 
-    const [completions, submissions] = await Promise.all([
-      includeCompletions
-        ? this.prisma.completion.findMany({
-            where: { verificationStatus: VerificationStatus.Pending },
-            orderBy: { completedAt: 'desc' },
-            take: upTo,
-            include: {
-              mission: { select: { title: true } },
-              user: { select: { displayName: true } },
-            },
-          })
-        : Promise.resolve([]),
-      includeSubmissions
-        ? this.prisma.userTaskSubmission.findMany({
-            where: { status: 'Submitted' },
-            orderBy: { submittedAt: 'desc' },
-            take: upTo,
-            include: {
-              task: { select: { title: true } },
-              submittedBy: { select: { displayName: true } },
-              attachments: { where: { objectKey: { not: null } }, take: 1 },
-            },
-          })
-        : Promise.resolve([]),
-    ]);
+    // Build one UNION-ALL branch per included source. Enum columns are cast to text
+    // so both branches share a column type across the union; the branch's WHERE
+    // compares against the enum-typed value so the underlying index stays usable.
+    const branches: Prisma.Sql[] = [];
+    if (includeCompletions) {
+      branches.push(Prisma.sql`
+        SELECT
+          ${ModerationQueueSource.Completion}::text AS "source",
+          c."id" AS "id",
+          ${ModerationTargetType.Completion}::text AS "targetType",
+          c."userId" AS "submittedById",
+          cu."displayName" AS "submitterDisplayName",
+          m."title" AS "title",
+          c."verificationStatus"::text AS "status",
+          c."proofType"::text AS "proofType",
+          c."proofText" AS "proofText",
+          c."proofKey" AS "proofKey",
+          c."xpAwarded" AS "xpAwarded",
+          c."completedAt" AS "submittedAt"
+        FROM "completions" c
+        JOIN "users" cu ON cu."id" = c."userId"
+        JOIN "missions" m ON m."id" = c."missionId"
+        WHERE c."verificationStatus" = ${VerificationStatus.Pending}::"VerificationStatus"
+      `);
+    }
+    if (includeSubmissions) {
+      branches.push(Prisma.sql`
+        SELECT
+          ${ModerationQueueSource.TaskSubmission}::text AS "source",
+          s."id" AS "id",
+          ${ModerationTargetType.UserTaskSubmission}::text AS "targetType",
+          s."submittedById" AS "submittedById",
+          su."displayName" AS "submitterDisplayName",
+          t."title" AS "title",
+          s."status"::text AS "status",
+          NULL::text AS "proofType",
+          s."notes" AS "proofText",
+          (
+            SELECT a."objectKey"
+            FROM "UserTaskAttachment" a
+            WHERE a."submissionId" = s."id" AND a."objectKey" IS NOT NULL
+            ORDER BY a."createdAt" ASC
+            LIMIT 1
+          ) AS "proofKey",
+          NULL::int AS "xpAwarded",
+          s."submittedAt" AS "submittedAt"
+        FROM "UserTaskSubmission" s
+        JOIN "users" su ON su."id" = s."submittedById"
+        JOIN "UserTask" t ON t."id" = s."taskId"
+        WHERE s."status" = ${TaskSubmissionStatus.Submitted}::"TaskSubmissionStatus"
+      `);
+    }
 
-    const merged: RawQueueItem[] = [
-      ...completions.map((c): RawQueueItem => ({
-        source: ModerationQueueSource.Completion,
-        id: c.id,
-        targetType: ModerationTargetType.Completion,
-        submittedById: c.userId,
-        submitterDisplayName: c.user.displayName,
-        title: c.mission.title,
-        status: c.verificationStatus,
-        proofType: c.proofType,
-        proofText: c.proofText,
-        proofKey: c.proofKey,
-        xpAwarded: c.xpAwarded,
-        submittedAt: c.completedAt,
-      })),
-      ...submissions.map((s): RawQueueItem => ({
-        source: ModerationQueueSource.TaskSubmission,
-        id: s.id,
-        targetType: ModerationTargetType.UserTaskSubmission,
-        submittedById: s.submittedById,
-        submitterDisplayName: s.submittedBy.displayName,
-        title: s.task.title,
-        status: s.status,
-        proofType: null,
-        proofText: s.notes,
-        proofKey: s.attachments[0]?.objectKey ?? null,
-        xpAwarded: null,
-        submittedAt: s.submittedAt,
-      })),
-    ]
-      .sort((a, b) => b.submittedAt.getTime() - a.submittedAt.getTime())
-      .slice((page - 1) * pageSize, (page - 1) * pageSize + pageSize);
+    const rows =
+      branches.length > 0
+        ? await this.prisma.$queryRaw<RawQueueRow[]>(Prisma.sql`
+            SELECT
+              q."source", q."id", q."targetType", q."submittedById", q."submitterDisplayName",
+              q."title", q."status", q."proofType", q."proofText", q."proofKey",
+              q."xpAwarded", q."submittedAt"
+            FROM (${Prisma.join(branches, ' UNION ALL ')}) AS q
+            ORDER BY q."submittedAt" DESC
+            LIMIT ${pageSize} OFFSET ${skip}
+          `)
+        : [];
 
-    // Presign media only for the returned page, not every fetched row.
+    // Presign media only for the returned page (constant `pageSize`, not the whole
+    // pending backlog).
     const items = await Promise.all(
-      merged.map(async ({ proofKey, ...rest }): Promise<ModerationQueueItemDto> => {
+      rows.map(async ({ proofKey, ...rest }): Promise<ModerationQueueItemDto> => {
         return {
           ...rest,
+          xpAwarded: rest.xpAwarded === null ? null : Number(rest.xpAwarded),
           proofUrl: proofKey ? await this.storage.getSignedDownloadUrl(proofKey) : null,
         };
       }),

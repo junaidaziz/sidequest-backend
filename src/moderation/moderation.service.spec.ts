@@ -44,6 +44,7 @@ describe('ModerationService', () => {
   let tx: TxMock;
   let prisma: {
     $transaction: jest.Mock;
+    $queryRaw: jest.Mock;
     completion: { count: jest.Mock; findMany: jest.Mock; findUnique: jest.Mock };
     userTaskSubmission: { count: jest.Mock; findMany: jest.Mock; findUnique: jest.Mock };
     report: { findMany: jest.Mock; count: jest.Mock; findFirst: jest.Mock; update: jest.Mock };
@@ -72,6 +73,7 @@ describe('ModerationService', () => {
       $transaction: jest.fn((arg: unknown) =>
         Array.isArray(arg) ? Promise.all(arg) : (arg as (t: TxMock) => Promise<unknown>)(tx),
       ),
+      $queryRaw: jest.fn(),
       completion: { count: jest.fn(), findMany: jest.fn(), findUnique: jest.fn() },
       userTaskSubmission: { count: jest.fn(), findMany: jest.fn(), findUnique: jest.fn() },
       report: { findMany: jest.fn(), count: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
@@ -127,41 +129,55 @@ describe('ModerationService', () => {
   // --- queue -------------------------------------------------------------
 
   describe('getQueue', () => {
-    const completionRow = {
+    // The merged queue is now a single raw `UNION ALL` query with the
+    // `ORDER BY submittedAt DESC` + `LIMIT`/`OFFSET` pushed down to Postgres, so the
+    // rows arrive already merged, sorted, and sliced to the page — the mock returns
+    // exactly what the DB would hand back for the requested page.
+    const completionQueueRow = {
+      source: ModerationQueueSource.Completion,
       id: COMPLETION_ID,
-      userId: USER_ID,
-      user: { displayName: 'Ann' },
-      mission: { title: 'Explore' },
-      verificationStatus: VerificationStatus.Pending,
+      targetType: ModerationTargetType.Completion,
+      submittedById: USER_ID,
+      submitterDisplayName: 'Ann',
+      title: 'Explore',
+      status: VerificationStatus.Pending,
       proofType: 'photo',
       proofText: null,
       proofKey: 'proof/key.jpg',
       xpAwarded: 40,
-      completedAt: new Date('2026-07-19T10:00:00Z'),
+      submittedAt: new Date('2026-07-19T10:00:00Z'),
     };
-    const submissionRow = {
+    const submissionQueueRow = {
+      source: ModerationQueueSource.TaskSubmission,
       id: 'sub-1',
+      targetType: ModerationTargetType.UserTaskSubmission,
       submittedById: 'user-2',
-      submittedBy: { displayName: 'Bob' },
-      task: { title: 'Challenge' },
+      submitterDisplayName: 'Bob',
+      title: 'Challenge',
       status: 'Submitted',
-      notes: 'did it',
-      attachments: [{ objectKey: 'att/key.jpg' }],
+      proofType: null,
+      proofText: 'did it',
+      proofKey: 'att/key.jpg',
+      xpAwarded: null,
       submittedAt: new Date('2026-07-18T10:00:00Z'),
     };
+
+    /** The `Prisma.Sql` argument the service passed to `$queryRaw` on its Nth call. */
+    const queryArg = (call = 0): { values: unknown[] } =>
+      prisma.$queryRaw.mock.calls[call][0] as { values: unknown[] };
 
     it('merges both sources, sorts newest-first, and presigns only page media', async () => {
       prisma.completion.count.mockResolvedValue(1);
       prisma.userTaskSubmission.count.mockResolvedValue(1);
-      prisma.completion.findMany.mockResolvedValue([completionRow]);
-      prisma.userTaskSubmission.findMany.mockResolvedValue([submissionRow]);
+      // DB returns the already-merged, already-sorted page.
+      prisma.$queryRaw.mockResolvedValue([completionQueueRow, submissionQueueRow]);
 
       const page = await service.getQueue({});
 
       expect(page.total).toBe(2);
       expect(page.pendingCompletions).toBe(1);
       expect(page.pendingTaskSubmissions).toBe(1);
-      // Completion (Jul 19) sorts before submission (Jul 18).
+      // Completion (Jul 19) sorts before submission (Jul 18) — as returned by the DB.
       expect(page.items[0].source).toBe(ModerationQueueSource.Completion);
       expect(page.items[0].proofUrl).toBe('signed://url');
       expect(page.items[1].source).toBe(ModerationQueueSource.TaskSubmission);
@@ -169,27 +185,65 @@ describe('ModerationService', () => {
       expect(storage.getSignedDownloadUrl).toHaveBeenCalledTimes(2);
     });
 
-    it('narrows to completions only when source=completion', async () => {
+    it('coerces a bigint xpAwarded from the raw driver back to a number', async () => {
       prisma.completion.count.mockResolvedValue(1);
-      prisma.completion.findMany.mockResolvedValue([completionRow]);
+      prisma.userTaskSubmission.count.mockResolvedValue(0);
+      prisma.$queryRaw.mockResolvedValue([{ ...completionQueueRow, xpAwarded: BigInt(40) }]);
 
       const page = await service.getQueue({ source: ModerationQueueSource.Completion });
 
+      expect(page.items[0].xpAwarded).toBe(40);
+      expect(typeof page.items[0].xpAwarded).toBe('number');
+    });
+
+    it('narrows to completions only when source=completion', async () => {
+      prisma.completion.count.mockResolvedValue(1);
+      prisma.$queryRaw.mockResolvedValue([completionQueueRow]);
+
+      const page = await service.getQueue({ source: ModerationQueueSource.Completion });
+
+      // Only the completion count runs; the submission count is skipped, and the
+      // union query is built with the completion branch only (the submission enum
+      // literal 'Submitted' never appears among the bound params).
       expect(prisma.userTaskSubmission.count).not.toHaveBeenCalled();
-      expect(prisma.userTaskSubmission.findMany).not.toHaveBeenCalled();
+      expect(queryArg().values).not.toContain('Submitted');
       expect(page.total).toBe(1);
       expect(page.items).toHaveLength(1);
     });
 
     it('narrows to task submissions only when source=task_submission', async () => {
       prisma.userTaskSubmission.count.mockResolvedValue(1);
-      prisma.userTaskSubmission.findMany.mockResolvedValue([{ ...submissionRow, attachments: [] }]);
+      prisma.$queryRaw.mockResolvedValue([{ ...submissionQueueRow, proofKey: null }]);
 
       const page = await service.getQueue({ source: ModerationQueueSource.TaskSubmission });
 
       expect(prisma.completion.count).not.toHaveBeenCalled();
       expect(page.items[0].proofUrl).toBeNull();
       expect(storage.getSignedDownloadUrl).not.toHaveBeenCalled();
+    });
+
+    it('bounds fetch cost on a deep page: LIMIT stays pageSize, OFFSET tracks the page', async () => {
+      prisma.completion.count.mockResolvedValue(500);
+      prisma.userTaskSubmission.count.mockResolvedValue(500);
+      prisma.$queryRaw.mockResolvedValue([]);
+
+      const pageSize = 25;
+      await service.getQueue({ page: 1, pageSize });
+      await service.getQueue({ page: 10, pageSize });
+
+      // The bound params end with [..., LIMIT, OFFSET]. The LIMIT is always the
+      // page size (25) regardless of depth — NOT the old `page * pageSize` fetch
+      // (which would be 250 at page 10). The OFFSET is `(page - 1) * pageSize`.
+      const page1Values = queryArg(0).values;
+      const page10Values = queryArg(1).values;
+
+      expect(page1Values[page1Values.length - 2]).toBe(pageSize);
+      expect(page1Values[page1Values.length - 1]).toBe(0);
+
+      expect(page10Values[page10Values.length - 2]).toBe(pageSize);
+      expect(page10Values[page10Values.length - 1]).toBe(225);
+      // Explicitly assert the deep page does NOT grow the fetch bound.
+      expect(page10Values[page10Values.length - 2]).not.toBe(10 * pageSize);
     });
   });
 
