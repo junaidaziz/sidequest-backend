@@ -104,6 +104,9 @@ model User {
   suspendedByAdmin         AdminUser?         @relation("UserSuspendedBy", fields: [suspendedByAdminId], references: [id])
 
   @@index([suspendedAt])
+  /// Backs the admin user list's default `orderBy: { createdAt: 'desc' }` and the
+  /// `registeredFrom`/`registeredTo` range filter (AdminUsersService.list).
+  @@index([createdAt])
   @@map("users")
 }
 
@@ -197,6 +200,9 @@ model Mission {
 
   @@index([status])
   @@index([featured])
+  /// Backs the admin challenge list's default `orderBy: { updatedAt: 'desc' }`
+  /// (AdminChallengesService.list).
+  @@index([updatedAt])
   @@map("missions")
 }
 
@@ -359,6 +365,13 @@ model UserTaskSubmission {
 
   @@index([taskId])
   @@index([submittedById])
+  /// Backs the moderation queue's pending-submission query, which filters on
+  /// `status = 'Submitted'` and orders by `submittedAt desc` in exactly this
+  /// shape (ModerationService.getQueue). Composite so one index serves both the
+  /// equality filter and the sort — mirrors the existing
+  /// `completions_verificationStatus_idx` precedent for the analogous
+  /// Completion.verificationStatus queue query.
+  @@index([status, submittedAt])
 }
 
 model UserTaskAttachment {
@@ -1119,6 +1132,9 @@ model NotificationCampaign {
 
   @@index([status])
   @@index([scheduledAt])
+  /// Backs the campaign list's default `orderBy: { createdAt: 'desc' }`
+  /// (NotificationCampaignsService.list).
+  @@index([createdAt])
 }
 
 /// Fan-out/delivery-stats row: one per (campaign, user).
