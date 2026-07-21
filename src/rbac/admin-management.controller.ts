@@ -8,6 +8,7 @@ import {
   HttpStatus,
   Ip,
   Param,
+  ParseUUIDPipe,
   Patch,
   Post,
   Put,
@@ -82,7 +83,7 @@ export class AdminManagementController {
   @ApiOperation({ summary: 'View an admin account' })
   @ApiResponse({ status: 200, type: AdminUserDto })
   @ApiResponse({ status: 404, description: 'Admin not found' })
-  get(@Param('id') id: string): Promise<AdminUserDto> {
+  get(@Param('id', ParseUUIDPipe) id: string): Promise<AdminUserDto> {
     return this.service.get(id);
   }
 
@@ -94,7 +95,7 @@ export class AdminManagementController {
   @ApiResponse({ status: 404, description: 'Admin not found' })
   update(
     @CurrentAdmin() actor: AuthAdmin,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateAdminDto,
     @Ip() ip: string,
     @Headers('user-agent') userAgent?: string,
@@ -110,7 +111,7 @@ export class AdminManagementController {
   @ApiResponse({ status: 404, description: 'Admin not found' })
   disable(
     @CurrentAdmin() actor: AuthAdmin,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Ip() ip: string,
     @Headers('user-agent') userAgent?: string,
   ): Promise<AdminUserDto> {
@@ -133,7 +134,7 @@ export class AdminManagementController {
   @ApiResponse({ status: 200, type: [PermissionOverrideDto] })
   @ApiResponse({ status: 403, description: 'Missing admins.view permission' })
   @ApiResponse({ status: 404, description: 'Admin not found' })
-  listOverrides(@Param('id') id: string): Promise<PermissionOverrideDto[]> {
+  listOverrides(@Param('id', ParseUUIDPipe) id: string): Promise<PermissionOverrideDto[]> {
     return this.service.listOverrides(id);
   }
 
@@ -151,7 +152,7 @@ export class AdminManagementController {
   @ApiResponse({ status: 404, description: 'Admin or permission key not found' })
   upsertOverride(
     @CurrentAdmin() actor: AuthAdmin,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Param('permissionKey') permissionKey: string,
     @Body() dto: UpsertPermissionOverrideDto,
     @Ip() ip: string,
@@ -180,7 +181,7 @@ export class AdminManagementController {
   @ApiResponse({ status: 404, description: 'Admin or permission key not found' })
   async removeOverride(
     @CurrentAdmin() actor: AuthAdmin,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Param('permissionKey') permissionKey: string,
     @Ip() ip: string,
     @Headers('user-agent') userAgent?: string,
@@ -197,7 +198,7 @@ export class AdminManagementController {
   @ApiResponse({ status: 404, description: 'Admin not found' })
   async resetMfa(
     @CurrentAdmin() actor: AuthAdmin,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Ip() ip: string,
     @Headers('user-agent') userAgent?: string,
   ): Promise<AdminSuccessResponseDto> {
@@ -213,7 +214,7 @@ export class AdminManagementController {
   @ApiResponse({ status: 404, description: 'Admin not found' })
   async revokeSessions(
     @CurrentAdmin() actor: AuthAdmin,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Ip() ip: string,
     @Headers('user-agent') userAgent?: string,
   ): Promise<AdminSuccessResponseDto> {
