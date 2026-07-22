@@ -44,4 +44,17 @@ describe('EmailService', () => {
     expect(message.html).toContain('Owner');
     expect(message.html).toContain('https://x/accept?token=abc');
   });
+
+  it('escapes dynamic HTML text and attribute values while preserving plain text', async () => {
+    await service.sendAdminInvite(
+      'a@b.com',
+      '<img src=x onerror=alert(1)>',
+      'https://x/accept?x=" onmouseover="bad',
+    );
+    const message = client.send.mock.calls[0][0];
+    expect(message.html).not.toContain('<img');
+    expect(message.html).toContain('&lt;img');
+    expect(message.html).toContain('&quot; onmouseover=&quot;bad');
+    expect(message.text).toContain('<img src=x onerror=alert(1)>');
+  });
 });
