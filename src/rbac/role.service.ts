@@ -90,22 +90,21 @@ export class RoleService {
       this.prisma.rolePermission.createMany({
         data: permissions.map((p) => ({ roleId, permissionId: p.id })),
       }),
+      this.audit.buildRecord({
+        actorAdminUserId: actor.adminUserId,
+        action: 'roles.manage',
+        targetType: 'Role',
+        targetId: roleId,
+        previousValue: { permissionKeys: previousKeys },
+        newValue: { permissionKeys: dto.permissionKeys },
+        result: AuditResult.Success,
+        ipAddress: ctx.ipAddress,
+        userAgent: ctx.userAgent,
+      }),
     ]);
 
     // Any admin holding this role now has a different effective set — invalidate.
     await this.resolver.bumpRoleVersion();
-
-    await this.audit.record({
-      actorAdminUserId: actor.adminUserId,
-      action: 'roles.manage',
-      targetType: 'Role',
-      targetId: roleId,
-      previousValue: { permissionKeys: previousKeys },
-      newValue: { permissionKeys: dto.permissionKeys },
-      result: AuditResult.Success,
-      ipAddress: ctx.ipAddress,
-      userAgent: ctx.userAgent,
-    });
 
     return {
       id: role.id,

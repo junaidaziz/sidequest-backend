@@ -21,7 +21,7 @@ describe('RoleService', () => {
     rolePermission: { deleteMany: jest.Mock; createMany: jest.Mock };
     $transaction: jest.Mock;
   };
-  let audit: { record: jest.Mock };
+  let audit: { record: jest.Mock; buildRecord: jest.Mock };
   let resolver: { bumpRoleVersion: jest.Mock };
   let service: RoleService;
 
@@ -32,7 +32,10 @@ describe('RoleService', () => {
       rolePermission: { deleteMany: jest.fn(), createMany: jest.fn() },
       $transaction: jest.fn().mockResolvedValue([]),
     };
-    audit = { record: jest.fn().mockResolvedValue(undefined) };
+    audit = {
+      record: jest.fn().mockResolvedValue(undefined),
+      buildRecord: jest.fn().mockReturnValue({}),
+    };
     resolver = { bumpRoleVersion: jest.fn() };
     service = new RoleService(
       prisma as unknown as PrismaService,
@@ -108,7 +111,7 @@ describe('RoleService', () => {
       const res = await service.updateRolePermissions(ACTOR, 'r', dto, CTX);
       expect(res.permissionKeys).toEqual(['users.view']);
       expect(resolver.bumpRoleVersion).toHaveBeenCalled();
-      expect(audit.record).toHaveBeenCalledWith(
+      expect(audit.buildRecord).toHaveBeenCalledWith(
         expect.objectContaining({ action: 'roles.manage' }),
       );
     });

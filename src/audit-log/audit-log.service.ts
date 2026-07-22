@@ -46,21 +46,28 @@ export class AuditLogService {
    * callers that prefer it (auth attempts, etc.).
    */
   buildRecord(params: RecordAuditParams): Prisma.PrismaPromise<unknown> {
-    return this.prisma.auditLog.create({
-      data: {
-        adminUserId: params.actorAdminUserId,
-        action: params.action,
-        targetType: params.targetType ?? null,
-        targetId: params.targetId ?? null,
-        previousValue: this.toJson(params.previousValue),
-        // result/reason have no dedicated columns on the minimal, immutable
-        // Phase-3 model — fold them into newValue under reserved keys so they
-        // stay queryable (JSON path) without a schema change.
-        newValue: this.buildNewValue(params.newValue, params.result, params.reason),
-        ipAddress: params.ipAddress ?? null,
-        userAgent: params.userAgent ?? null,
-      },
-    });
+    return this.prisma.auditLog.create({ data: this.buildData(params) });
+  }
+
+  /** Creates an audit row through the caller's interactive transaction client. */
+  buildRecordWith(tx: Prisma.TransactionClient, params: RecordAuditParams) {
+    return tx.auditLog.create({ data: this.buildData(params) });
+  }
+
+  private buildData(params: RecordAuditParams): Prisma.AuditLogUncheckedCreateInput {
+    return {
+      adminUserId: params.actorAdminUserId,
+      action: params.action,
+      targetType: params.targetType ?? null,
+      targetId: params.targetId ?? null,
+      previousValue: this.toJson(params.previousValue),
+      // result/reason have no dedicated columns on the minimal, immutable
+      // Phase-3 model — fold them into newValue under reserved keys so they
+      // stay queryable (JSON path) without a schema change.
+      newValue: this.buildNewValue(params.newValue, params.result, params.reason),
+      ipAddress: params.ipAddress ?? null,
+      userAgent: params.userAgent ?? null,
+    };
   }
 
   /** Paginated, filterable, read-only list. No mutation counterpart exists — by design. */

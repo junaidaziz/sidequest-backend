@@ -104,17 +104,32 @@ export class AdminManagementService {
 
     let created: AdminUser & { role: Role };
     try {
-      created = await this.prisma.adminUser.create({
-        data: {
-          email: dto.email,
-          displayName: dto.displayName,
-          roleId: dto.roleId,
-          status: 'Invited',
-          mustChangePassword: true,
-          invitedByAdminId: actor.adminUserId,
-          invitedAt: new Date(),
-        },
-        include: { role: true },
+      created = await this.serializable(async (tx) => {
+        const invited = await tx.adminUser.create({
+          data: {
+            email: dto.email,
+            displayName: dto.displayName,
+            roleId: dto.roleId,
+            status: 'Invited',
+            mustChangePassword: true,
+            invitedByAdminId: actor.adminUserId,
+            invitedAt: new Date(),
+            inviteDeliveryStatus: 'Pending',
+          },
+          include: { role: true },
+        });
+        await this.audit.buildRecordWith(tx, {
+          actorAdminUserId: actor.adminUserId,
+          action: 'admins.manage',
+          targetType: 'AdminUser',
+          targetId: invited.id,
+          newValue: { email: invited.email, roleId: invited.roleId, action: 'invite' },
+          result: AuditResult.Success,
+          reason: dto.note ?? null,
+          ipAddress: ctx.ipAddress,
+          userAgent: ctx.userAgent,
+        });
+        return invited;
       });
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
@@ -127,25 +142,71 @@ export class AdminManagementService {
     // never returned in the API response. Returning it would let any admin with
     // admins.manage claim someone else's invited account before the real invitee
     // sees the email, defeating the "controls the mailbox" guarantee of invite-
-    // by-email. (Until a real email provider is wired the invite email is a
-    // console no-op; end-to-end acceptance is an accepted, documented gap.)
+    // by-email.
     const inviteToken = await this.adminAuth.issueInviteToken(created.id);
     const acceptUrl = `${this.portalUrl}/admin/accept-invite?token=${inviteToken}`;
-    await this.email.sendAdminInvite(created.email, actor.email, acceptUrl);
-
-    await this.audit.record({
-      actorAdminUserId: actor.adminUserId,
-      action: 'admins.manage',
-      targetType: 'AdminUser',
-      targetId: created.id,
-      newValue: { email: created.email, roleId: created.roleId, action: 'invite' },
-      result: AuditResult.Success,
-      reason: dto.note ?? null,
-      ipAddress: ctx.ipAddress,
-      userAgent: ctx.userAgent,
+    const delivery = await this.email.sendAdminInvite(created.email, actor.email, acceptUrl);
+    created = await this.prisma.adminUser.update({
+      where: { id: created.id },
+      data: {
+        inviteDeliveryStatus: delivery.status === 'ok' ? 'Sent' : 'Failed',
+        inviteDeliveryAttemptedAt: new Date(),
+        inviteDeliveryError:
+          delivery.status === 'error'
+            ? (delivery.message ?? 'Delivery failed').slice(0, 500)
+            : null,
+      },
+      include: { role: true },
     });
 
     return this.toDto(created, created.role);
+  }
+
+  /** Retries delivery for an unaccepted invite without holding a DB transaction over I/O. */
+  async resendInvite(
+    actor: AuthAdmin,
+    id: string,
+    ctx: AdminRequestContext,
+  ): Promise<AdminUserDto> {
+    const invited = await this.prisma.adminUser.findFirst({
+      where: { id, status: 'Invited', deletedAt: null },
+      include: { role: true },
+    });
+    if (!invited) throw new NotFoundException('Pending invite not found');
+
+    await this.prisma.adminUser.update({
+      where: { id },
+      data: { inviteDeliveryStatus: 'Pending', inviteDeliveryError: null },
+    });
+    const token = await this.adminAuth.issueInviteToken(id);
+    const result = await this.email.sendAdminInvite(
+      invited.email,
+      actor.email,
+      `${this.portalUrl}/admin/accept-invite?token=${token}`,
+    );
+    return this.serializable(async (tx) => {
+      const updated = await tx.adminUser.update({
+        where: { id },
+        data: {
+          inviteDeliveryStatus: result.status === 'ok' ? 'Sent' : 'Failed',
+          inviteDeliveryAttemptedAt: new Date(),
+          inviteDeliveryError:
+            result.status === 'error' ? (result.message ?? 'Delivery failed').slice(0, 500) : null,
+        },
+        include: { role: true },
+      });
+      await this.audit.buildRecordWith(tx, {
+        actorAdminUserId: actor.adminUserId,
+        action: 'admins.invite.resend',
+        targetType: 'AdminUser',
+        targetId: id,
+        newValue: { deliveryStatus: updated.inviteDeliveryStatus },
+        result: result.status === 'ok' ? AuditResult.Success : AuditResult.Failure,
+        ipAddress: ctx.ipAddress,
+        userAgent: ctx.userAgent,
+      });
+      return this.toDto(updated, updated.role);
+    });
   }
 
   /** Edits display name and/or role. Role change requires the caller's roles.assign. */
@@ -179,44 +240,53 @@ export class AdminManagementService {
       displayName: dto.displayName ?? undefined,
       roleId: roleChanging ? dto.roleId : undefined,
     };
-    const updated = roleChanging
-      ? await this.prisma.$transaction(
-          async (tx) => {
-            if (existing.role.key === 'owner') {
-              await this.assertAnotherActiveOwner(tx, id);
-            }
-            const changed = await tx.adminUser.update({
-              where: { id },
-              data: updateData,
-              include: { role: true },
-            });
-            await this.assertRecoveryAuthorityRemains(tx);
-            return changed;
-          },
-          { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-        )
-      : await this.prisma.adminUser.update({
+    const updated = await this.serializable(async (tx) => {
+      if (roleChanging) {
+        if (existing.role.key === 'owner') {
+          await this.assertAnotherActiveOwner(tx, id);
+        }
+        const changed = await tx.adminUser.update({
           where: { id },
           data: updateData,
           include: { role: true },
         });
+        await this.assertRecoveryAuthorityRemains(tx);
+        await this.audit.buildRecordWith(tx, {
+          actorAdminUserId: actor.adminUserId,
+          action: 'roles.assign',
+          targetType: 'AdminUser',
+          targetId: id,
+          previousValue: { displayName: existing.displayName, roleId: existing.roleId },
+          newValue: { displayName: changed.displayName, roleId: changed.roleId },
+          result: AuditResult.Success,
+          ipAddress: ctx.ipAddress,
+          userAgent: ctx.userAgent,
+        });
+        return changed;
+      }
+      const changed = await tx.adminUser.update({
+        where: { id },
+        data: updateData,
+        include: { role: true },
+      });
+      await this.audit.buildRecordWith(tx, {
+        actorAdminUserId: actor.adminUserId,
+        action: 'admins.manage',
+        targetType: 'AdminUser',
+        targetId: id,
+        previousValue: { displayName: existing.displayName, roleId: existing.roleId },
+        newValue: { displayName: changed.displayName, roleId: changed.roleId },
+        result: AuditResult.Success,
+        ipAddress: ctx.ipAddress,
+        userAgent: ctx.userAgent,
+      });
+      return changed;
+    });
 
     // A role change alters this admin's effective permission set — invalidate cache.
     if (roleChanging) {
       await this.resolver.bumpRoleVersion();
     }
-
-    await this.audit.record({
-      actorAdminUserId: actor.adminUserId,
-      action: roleChanging ? 'roles.assign' : 'admins.manage',
-      targetType: 'AdminUser',
-      targetId: id,
-      previousValue: { displayName: existing.displayName, roleId: existing.roleId },
-      newValue: { displayName: updated.displayName, roleId: updated.roleId },
-      result: AuditResult.Success,
-      ipAddress: ctx.ipAddress,
-      userAgent: ctx.userAgent,
-    });
 
     return this.toDto(updated, updated.role);
   }
@@ -234,37 +304,34 @@ export class AdminManagementService {
       throw new NotFoundException('Admin not found');
     }
 
-    const updated = await this.prisma.$transaction(
-      async (tx) => {
-        if (existing.role.key === 'owner') {
-          await this.assertAnotherActiveOwner(tx, id);
-        }
-        const suspended = await tx.adminUser.update({
-          where: { id },
-          data: { status: 'Suspended' },
-          include: { role: true },
-        });
-        await tx.adminSession.updateMany({
-          where: { adminUserId: id, revokedAt: null },
-          data: { revokedAt: new Date() },
-        });
-        await this.assertRecoveryAuthorityRemains(tx);
-        return suspended;
-      },
-      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-    );
-
-    await this.audit.record({
-      actorAdminUserId: actor.adminUserId,
-      action: 'admins.manage',
-      targetType: 'AdminUser',
-      targetId: id,
-      previousValue: { status: existing.status },
-      newValue: { status: 'Suspended', action: 'disable' },
-      result: AuditResult.Success,
-      ipAddress: ctx.ipAddress,
-      userAgent: ctx.userAgent,
+    const updated = await this.serializable(async (tx) => {
+      if (existing.role.key === 'owner') {
+        await this.assertAnotherActiveOwner(tx, id);
+      }
+      const suspended = await tx.adminUser.update({
+        where: { id },
+        data: { status: 'Suspended' },
+        include: { role: true },
+      });
+      await tx.adminSession.updateMany({
+        where: { adminUserId: id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      await this.assertRecoveryAuthorityRemains(tx);
+      await this.audit.buildRecordWith(tx, {
+        actorAdminUserId: actor.adminUserId,
+        action: 'admins.manage',
+        targetType: 'AdminUser',
+        targetId: id,
+        previousValue: { status: existing.status },
+        newValue: { status: 'Suspended', action: 'disable' },
+        result: AuditResult.Success,
+        ipAddress: ctx.ipAddress,
+        userAgent: ctx.userAgent,
+      });
+      return suspended;
     });
+
     return this.toDto(updated, updated.role);
   }
 
@@ -274,21 +341,22 @@ export class AdminManagementService {
     if (!existing) {
       throw new NotFoundException('Admin not found');
     }
-    await this.mfa.reset(id);
-    // Force re-auth too, so a live session can't skip the new enrollment.
-    await this.prisma.adminSession.updateMany({
-      where: { adminUserId: id, revokedAt: null },
-      data: { revokedAt: new Date() },
-    });
-    await this.audit.record({
-      actorAdminUserId: actor.adminUserId,
-      action: 'admins.manage',
-      targetType: 'AdminUser',
-      targetId: id,
-      newValue: { action: 'reset_mfa' },
-      result: AuditResult.Success,
-      ipAddress: ctx.ipAddress,
-      userAgent: ctx.userAgent,
+    await this.serializable(async (tx) => {
+      await this.mfa.reset(id, tx);
+      await tx.adminSession.updateMany({
+        where: { adminUserId: id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      await this.audit.buildRecordWith(tx, {
+        actorAdminUserId: actor.adminUserId,
+        action: 'admins.manage',
+        targetType: 'AdminUser',
+        targetId: id,
+        newValue: { action: 'reset_mfa' },
+        result: AuditResult.Success,
+        ipAddress: ctx.ipAddress,
+        userAgent: ctx.userAgent,
+      });
     });
   }
 
@@ -298,19 +366,21 @@ export class AdminManagementService {
     if (!existing) {
       throw new NotFoundException('Admin not found');
     }
-    const result = await this.prisma.adminSession.updateMany({
-      where: { adminUserId: id, revokedAt: null },
-      data: { revokedAt: new Date() },
-    });
-    await this.audit.record({
-      actorAdminUserId: actor.adminUserId,
-      action: 'admins.manage',
-      targetType: 'AdminUser',
-      targetId: id,
-      newValue: { action: 'revoke_sessions', revokedSessions: result.count },
-      result: AuditResult.Success,
-      ipAddress: ctx.ipAddress,
-      userAgent: ctx.userAgent,
+    await this.serializable(async (tx) => {
+      const result = await tx.adminSession.updateMany({
+        where: { adminUserId: id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      await this.audit.buildRecordWith(tx, {
+        actorAdminUserId: actor.adminUserId,
+        action: 'admins.manage',
+        targetType: 'AdminUser',
+        targetId: id,
+        newValue: { action: 'revoke_sessions', revokedSessions: result.count },
+        result: AuditResult.Success,
+        ipAddress: ctx.ipAddress,
+        userAgent: ctx.userAgent,
+      });
     });
   }
 
@@ -396,41 +466,36 @@ export class AdminManagementService {
         },
       });
 
-    const override =
-      dto.effect === 'REVOKE' && this.isRecoveryPermission(permissionKey)
-        ? await this.prisma.$transaction(
-            async (tx) => {
-              const changed = await writeOverride(tx);
-              await this.assertRecoveryAuthorityRemains(tx);
-              return changed;
-            },
-            { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-          )
-        : await writeOverride(this.prisma);
+    const override = await this.serializable(async (tx) => {
+      const changed = await writeOverride(tx);
+      if (dto.effect === 'REVOKE' && this.isRecoveryPermission(permissionKey)) {
+        await this.assertRecoveryAuthorityRemains(tx);
+      }
+      await this.audit.buildRecordWith(tx, {
+        actorAdminUserId: actor.adminUserId,
+        action: 'permissions.assign',
+        targetType: 'AdminUser',
+        targetId: adminId,
+        previousValue: existing
+          ? { permissionKey, effect: existing.effect, reason: existing.reason }
+          : null,
+        newValue: {
+          permissionKey,
+          effect: changed.effect,
+          reason: changed.reason,
+          action: 'upsert',
+        },
+        result: AuditResult.Success,
+        reason: dto.reason ?? null,
+        ipAddress: ctx.ipAddress,
+        userAgent: ctx.userAgent,
+      });
+      return changed;
+    });
 
     // The override changes this admin's effective permission set — invalidate the
     // Redis-cached set exactly as role/permission edits do (role.service mirror).
     await this.resolver.bumpRoleVersion();
-
-    await this.audit.record({
-      actorAdminUserId: actor.adminUserId,
-      action: 'permissions.assign',
-      targetType: 'AdminUser',
-      targetId: adminId,
-      previousValue: existing
-        ? { permissionKey, effect: existing.effect, reason: existing.reason }
-        : null,
-      newValue: {
-        permissionKey,
-        effect: override.effect,
-        reason: override.reason,
-        action: 'upsert',
-      },
-      result: AuditResult.Success,
-      reason: dto.reason ?? null,
-      ipAddress: ctx.ipAddress,
-      userAgent: ctx.userAgent,
-    });
 
     return this.toOverrideDto(override, permission);
   }
@@ -468,30 +533,24 @@ export class AdminManagementService {
       return { removed: false };
     }
 
-    if (existing.effect === 'GRANT' && this.isRecoveryPermission(permissionKey)) {
-      await this.prisma.$transaction(
-        async (tx) => {
-          await tx.adminUserPermissionOverride.delete({ where: { id: existing.id } });
-          await this.assertRecoveryAuthorityRemains(tx);
-        },
-        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-      );
-    } else {
-      await this.prisma.adminUserPermissionOverride.delete({ where: { id: existing.id } });
-    }
-    await this.resolver.bumpRoleVersion();
-
-    await this.audit.record({
-      actorAdminUserId: actor.adminUserId,
-      action: 'permissions.assign',
-      targetType: 'AdminUser',
-      targetId: adminId,
-      previousValue: { permissionKey, effect: existing.effect, reason: existing.reason },
-      newValue: { permissionKey, action: 'remove' },
-      result: AuditResult.Success,
-      ipAddress: ctx.ipAddress,
-      userAgent: ctx.userAgent,
+    await this.serializable(async (tx) => {
+      await tx.adminUserPermissionOverride.delete({ where: { id: existing.id } });
+      if (existing.effect === 'GRANT' && this.isRecoveryPermission(permissionKey)) {
+        await this.assertRecoveryAuthorityRemains(tx);
+      }
+      await this.audit.buildRecordWith(tx, {
+        actorAdminUserId: actor.adminUserId,
+        action: 'permissions.assign',
+        targetType: 'AdminUser',
+        targetId: adminId,
+        previousValue: { permissionKey, effect: existing.effect, reason: existing.reason },
+        newValue: { permissionKey, action: 'remove' },
+        result: AuditResult.Success,
+        ipAddress: ctx.ipAddress,
+        userAgent: ctx.userAgent,
+      });
     });
+    await this.resolver.bumpRoleVersion();
 
     return { removed: true };
   }
@@ -575,6 +634,28 @@ export class AdminManagementService {
     return (RECOVERY_PERMISSION_KEYS as readonly string[]).includes(permissionKey);
   }
 
+  /** Retries PostgreSQL serialization conflicts, then returns a retryable 409. */
+  private async serializable<T>(
+    operation: (tx: Prisma.TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        return await this.prisma.$transaction(operation, {
+          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+        });
+      } catch (error) {
+        const serializationConflict =
+          error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034';
+        if (!serializationConflict) throw error;
+        if (attempt === 3) {
+          throw new ConflictException('Concurrent admin change; retry the request');
+        }
+        await new Promise((resolve) => setTimeout(resolve, attempt * 10));
+      }
+    }
+    throw new ConflictException('Concurrent admin change; retry the request');
+  }
+
   private toDto(admin: AdminUser, role: Role): AdminUserDto {
     return {
       id: admin.id,
@@ -590,6 +671,8 @@ export class AdminManagementService {
       // locked-out attacker can't read when their next attempt window opens.
       isLocked: admin.lockedUntil !== null && admin.lockedUntil.getTime() > Date.now(),
       createdAt: admin.createdAt,
+      inviteDeliveryStatus: admin.inviteDeliveryStatus,
+      inviteDeliveryAttemptedAt: admin.inviteDeliveryAttemptedAt,
     };
   }
 }

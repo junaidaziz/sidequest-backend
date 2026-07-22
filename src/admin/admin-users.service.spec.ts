@@ -14,6 +14,7 @@ function buildUser(overrides: Partial<User> = {}): User {
     email: 'ada@example.com',
     passwordHash: 'hash',
     refreshTokenHash: 'rt',
+    refreshPreviousTokenHash: null,
     googleId: null,
     displayName: 'Ada',
     avatarUrl: null,

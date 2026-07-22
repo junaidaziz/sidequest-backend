@@ -65,6 +65,18 @@ export class AdminManagementController {
     return this.service.invite(actor, dto, this.ctx(ip, userAgent));
   }
 
+  @Post(':id/resend-invite')
+  @RequirePermission('admins.manage')
+  @ApiOperation({ summary: 'Retry delivery of a pending admin invitation' })
+  resendInvite(
+    @CurrentAdmin() actor: AuthAdmin,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Ip() ip: string,
+    @Headers('user-agent') userAgent?: string,
+  ): Promise<AdminUserDto> {
+    return this.service.resendInvite(actor, id, this.ctx(ip, userAgent));
+  }
+
   // NOTE: registered before ':id' — Nest/Express match routes in declaration
   // order for a shared base path, so 'me' must come first or ':id' would
   // swallow it as a literal id value of "me".

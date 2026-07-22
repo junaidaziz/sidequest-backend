@@ -37,6 +37,9 @@ function adminRow(overrides: Record<string, unknown> = {}) {
     mustChangePassword: false,
     lastLoginAt: null,
     lockedUntil: null,
+    inviteDeliveryStatus: null,
+    inviteDeliveryAttemptedAt: null,
+    inviteDeliveryError: null,
     createdAt: new Date(),
     ...overrides,
   };
@@ -76,7 +79,7 @@ describe('AdminManagementService', () => {
     };
     $transaction: jest.Mock;
   };
-  let audit: { record: jest.Mock };
+  let audit: { record: jest.Mock; buildRecordWith: jest.Mock };
   let email: { sendAdminInvite: jest.Mock };
   let adminAuth: { issueInviteToken: jest.Mock };
   let mfa: { reset: jest.Mock };
@@ -112,8 +115,11 @@ describe('AdminManagementService', () => {
         return [adminRow({ status: 'Suspended' }), { count: 1 }];
       }),
     };
-    audit = { record: jest.fn().mockResolvedValue(undefined) };
-    email = { sendAdminInvite: jest.fn() };
+    audit = {
+      record: jest.fn().mockResolvedValue(undefined),
+      buildRecordWith: jest.fn().mockResolvedValue(undefined),
+    };
+    email = { sendAdminInvite: jest.fn().mockResolvedValue({ status: 'ok', id: 'mail-1' }) };
     adminAuth = { issueInviteToken: jest.fn().mockResolvedValue('raw-token') };
     mfa = { reset: jest.fn() };
     resolver = {
@@ -131,6 +137,10 @@ describe('AdminManagementService', () => {
       { get: () => undefined } as unknown as ConfigService,
     );
     prisma.adminUser.findMany.mockResolvedValue([recoveryAdmin()]);
+    prisma.adminUser.update.mockImplementation(
+      async ({ data }: { data: Record<string, unknown> }) =>
+        adminRow({ status: 'Invited', ...data }),
+    );
   });
 
   describe('list / get', () => {
@@ -167,7 +177,7 @@ describe('AdminManagementService', () => {
       expect(res.id).toBe('admin-2');
       expect(adminAuth.issueInviteToken).toHaveBeenCalledWith('admin-2');
       expect(email.sendAdminInvite).toHaveBeenCalled();
-      expect(audit.record).toHaveBeenCalled();
+      expect(audit.buildRecordWith).toHaveBeenCalled();
     });
 
     it('409s on a duplicate email', async () => {
@@ -181,6 +191,42 @@ describe('AdminManagementService', () => {
       await expect(
         service.invite(ACTOR, { email: 'a@b.com', displayName: 'A', roleId: 'role-1' }, CTX),
       ).rejects.toThrow(ConflictException);
+    });
+
+    it('persists and returns Failed when invite delivery fails', async () => {
+      prisma.role.findUnique.mockResolvedValue({ id: 'role-1' });
+      prisma.adminUser.create.mockResolvedValue(adminRow({ status: 'Invited' }));
+      email.sendAdminInvite.mockResolvedValue({ status: 'error', message: 'provider unavailable' });
+      const res = await service.invite(
+        ACTOR,
+        { email: 'a@b.com', displayName: 'A', roleId: 'role-1' },
+        CTX,
+      );
+      expect(prisma.adminUser.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ inviteDeliveryStatus: 'Failed' }),
+        }),
+      );
+      expect(res.inviteDeliveryStatus).toBe('Failed');
+    });
+  });
+
+  describe('resendInvite', () => {
+    it('issues a fresh token, sends, persists Sent, and audits the attempt', async () => {
+      prisma.adminUser.findFirst.mockResolvedValue(adminRow({ status: 'Invited' }));
+      const res = await service.resendInvite(ACTOR, 'admin-2', CTX);
+      expect(adminAuth.issueInviteToken).toHaveBeenCalledWith('admin-2');
+      expect(email.sendAdminInvite).toHaveBeenCalled();
+      expect(res.inviteDeliveryStatus).toBe('Sent');
+      expect(audit.buildRecordWith).toHaveBeenCalledWith(
+        prisma,
+        expect.objectContaining({ action: 'admins.invite.resend' }),
+      );
+    });
+
+    it('rejects resend for a non-pending account', async () => {
+      prisma.adminUser.findFirst.mockResolvedValue(null);
+      await expect(service.resendInvite(ACTOR, 'admin-2', CTX)).rejects.toThrow(NotFoundException);
     });
   });
 
@@ -216,7 +262,8 @@ describe('AdminManagementService', () => {
       prisma.adminUser.update.mockResolvedValue(adminRow({ roleId: 'role-9' }));
       await service.update(ACTOR, 'admin-2', { roleId: 'role-9' }, CTX);
       expect(resolver.bumpRoleVersion).toHaveBeenCalled();
-      expect(audit.record).toHaveBeenCalledWith(
+      expect(audit.buildRecordWith).toHaveBeenCalledWith(
+        expect.anything(),
         expect.objectContaining({ action: 'roles.assign' }),
       );
     });
@@ -367,7 +414,7 @@ describe('AdminManagementService', () => {
     it('resets MFA and revokes sessions', async () => {
       prisma.adminUser.findFirst.mockResolvedValue(adminRow());
       await service.resetMfa(ACTOR, 'admin-2', CTX);
-      expect(mfa.reset).toHaveBeenCalledWith('admin-2');
+      expect(mfa.reset).toHaveBeenCalledWith('admin-2', expect.anything());
       expect(prisma.adminSession.updateMany).toHaveBeenCalled();
     });
   });
@@ -382,7 +429,7 @@ describe('AdminManagementService', () => {
       prisma.adminUser.findFirst.mockResolvedValue(adminRow());
       await service.revokeSessions(ACTOR, 'admin-2', CTX);
       expect(prisma.adminSession.updateMany).toHaveBeenCalled();
-      expect(audit.record).toHaveBeenCalled();
+      expect(audit.buildRecordWith).toHaveBeenCalled();
     });
   });
 
@@ -454,7 +501,8 @@ describe('AdminManagementService', () => {
         expect(res.permissionKey).toBe('users.suspend');
         expect(res.grantedByAdminId).toBe('actor-1');
         expect(resolver.bumpRoleVersion).toHaveBeenCalled();
-        expect(audit.record).toHaveBeenCalledWith(
+        expect(audit.buildRecordWith).toHaveBeenCalledWith(
+          expect.anything(),
           expect.objectContaining({
             action: 'permissions.assign',
             targetType: 'AdminUser',
@@ -482,7 +530,8 @@ describe('AdminManagementService', () => {
             },
           }),
         );
-        expect(audit.record).toHaveBeenCalledWith(
+        expect(audit.buildRecordWith).toHaveBeenCalledWith(
+          expect.anything(),
           expect.objectContaining({
             previousValue: expect.objectContaining({ effect: 'GRANT' }),
           }),
@@ -571,7 +620,7 @@ describe('AdminManagementService', () => {
         expect(res).toEqual({ removed: false });
         expect(prisma.adminUserPermissionOverride.delete).not.toHaveBeenCalled();
         expect(resolver.bumpRoleVersion).not.toHaveBeenCalled();
-        expect(audit.record).not.toHaveBeenCalled();
+        expect(audit.buildRecordWith).not.toHaveBeenCalled();
       });
 
       it('deletes the row, bumps role-version, and audits when an override exists', async () => {
@@ -584,7 +633,8 @@ describe('AdminManagementService', () => {
           where: { id: 'ovr-1' },
         });
         expect(resolver.bumpRoleVersion).toHaveBeenCalled();
-        expect(audit.record).toHaveBeenCalledWith(
+        expect(audit.buildRecordWith).toHaveBeenCalledWith(
+          expect.anything(),
           expect.objectContaining({ action: 'permissions.assign' }),
         );
       });

@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, Injectable, Logger } from '@nestjs/common';
 import { randomBytes } from 'crypto';
 import * as bcrypt from 'bcrypt';
-import { AdminUser } from '@prisma/client';
+import { AdminUser, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AdminCryptoService } from './admin-crypto.service';
 import { AdminMfaSetupResponseDto } from './dto/admin-mfa-response.dto';
@@ -31,12 +31,12 @@ export class AdminMfaService {
    * first code is confirmed via verify(). Blocks if MFA is already active (the
    * admin must reset-mfa first).
    */
-  async setup(admin: AdminUser): Promise<AdminMfaSetupResponseDto> {
+  async setup(admin: AdminUser, tx?: Prisma.TransactionClient): Promise<AdminMfaSetupResponseDto> {
     if (admin.mfaEnabledAt) {
       throw new ConflictException('MFA is already enabled; reset it before setting up again');
     }
     const secret = generateTotpSecret();
-    await this.prisma.adminUser.update({
+    await (tx ?? this.prisma).adminUser.update({
       where: { id: admin.id },
       data: { mfaSecret: this.crypto.encrypt(secret) },
     });
@@ -47,7 +47,12 @@ export class AdminMfaService {
    * Confirms the first TOTP code, flips MFA on, and generates 10 recovery codes.
    * The raw recovery codes are returned exactly once; only their hashes persist.
    */
-  async verifyAndEnable(admin: AdminUser, code: string): Promise<string[]> {
+  async verifyAndEnable(
+    admin: AdminUser,
+    code: string,
+    tx?: Prisma.TransactionClient,
+    afterWrite?: (tx: Prisma.TransactionClient) => Promise<unknown>,
+  ): Promise<string[]> {
     if (admin.mfaEnabledAt) {
       throw new ConflictException('MFA is already enabled');
     }
@@ -64,17 +69,36 @@ export class AdminMfaService {
       rawCodes.map((c) => bcrypt.hash(this.normalizeRecoveryCode(c), BCRYPT_ROUNDS)),
     );
 
-    await this.prisma.$transaction([
+    const client = tx ?? this.prisma;
+    const operations = [
       // Replace any prior recovery codes so a re-enroll never leaves stale ones.
-      this.prisma.adminMfaRecoveryCode.deleteMany({ where: { adminUserId: admin.id } }),
-      this.prisma.adminMfaRecoveryCode.createMany({
+      client.adminMfaRecoveryCode.deleteMany({ where: { adminUserId: admin.id } }),
+      client.adminMfaRecoveryCode.createMany({
         data: hashes.map((codeHash) => ({ adminUserId: admin.id, codeHash })),
       }),
-      this.prisma.adminUser.update({
+      client.adminUser.update({
         where: { id: admin.id },
         data: { mfaEnabledAt: new Date() },
       }),
-    ]);
+    ];
+    if (tx) {
+      await Promise.all(operations);
+      if (afterWrite) await afterWrite(tx);
+    } else if (afterWrite) {
+      await this.prisma.$transaction(async (transaction) => {
+        await Promise.all([
+          transaction.adminMfaRecoveryCode.deleteMany({ where: { adminUserId: admin.id } }),
+          transaction.adminMfaRecoveryCode.createMany({
+            data: hashes.map((codeHash) => ({ adminUserId: admin.id, codeHash })),
+          }),
+          transaction.adminUser.update({
+            where: { id: admin.id },
+            data: { mfaEnabledAt: new Date() },
+          }),
+        ]);
+        await afterWrite(transaction);
+      });
+    } else await this.prisma.$transaction(operations);
 
     this.logger.log(`MFA enabled for admin ${admin.id}`);
     return rawCodes;
@@ -97,14 +121,20 @@ export class AdminMfaService {
   }
 
   /** Clears all MFA state for an admin (used by the admins.manage reset-mfa action). */
-  async reset(adminUserId: string): Promise<void> {
-    await this.prisma.$transaction([
-      this.prisma.adminMfaRecoveryCode.deleteMany({ where: { adminUserId } }),
-      this.prisma.adminUser.update({
+  async reset(adminUserId: string, tx?: Prisma.TransactionClient): Promise<void> {
+    const client = tx ?? this.prisma;
+    const operations = [
+      client.adminMfaRecoveryCode.deleteMany({ where: { adminUserId } }),
+      client.adminUser.update({
         where: { id: adminUserId },
         data: { mfaSecret: null, mfaEnabledAt: null },
       }),
-    ]);
+    ];
+    if (tx) {
+      await Promise.all(operations);
+    } else {
+      await this.prisma.$transaction(operations);
+    }
   }
 
   private async consumeRecoveryCode(adminUserId: string, code: string): Promise<boolean> {

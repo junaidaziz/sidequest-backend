@@ -37,6 +37,12 @@ export class AdminUserDto {
 
   @ApiProperty()
   createdAt!: Date;
+
+  @ApiProperty({ enum: ['Pending', 'Sent', 'Failed'], nullable: true })
+  inviteDeliveryStatus!: string | null;
+
+  @ApiProperty({ nullable: true })
+  inviteDeliveryAttemptedAt!: Date | null;
 }
 
 /** A permission catalog entry (read-only, seed-defined). */
