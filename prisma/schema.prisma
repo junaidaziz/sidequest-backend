@@ -21,6 +21,9 @@ model User {
   /// bcrypt hash of the SHA-256 digest of the user's current refresh token.
   /// Used for refresh-token rotation; never stores the raw token.
   refreshTokenHash String?
+  /// Immediate predecessor retained only to distinguish a genuine rotated-token
+  /// replay from arbitrary invalid input. A match revokes the whole user family.
+  refreshPreviousTokenHash String?
   displayName  String?
   /// S3 object key for the user's profile picture (not a full URL — resolved
   /// to a presigned GET URL at read time, same convention as Completion.proofKey).
@@ -662,6 +665,10 @@ model AdminUser {
   invitedAdmins    AdminUser[] @relation("AdminInvites")
   invitedAt        DateTime?
   inviteAcceptedAt DateTime?
+  /// Observable invite delivery state: Pending | Sent | Failed.
+  inviteDeliveryStatus      String?
+  inviteDeliveryAttemptedAt DateTime?
+  inviteDeliveryError       String?
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -808,6 +815,8 @@ model AdminSession {
   adminUserId      String
   adminUser        AdminUser  @relation(fields: [adminUserId], references: [id], onDelete: Cascade)
   refreshTokenHash String
+  /// Immediate predecessor used for replay detection; never a raw token.
+  refreshPreviousTokenHash String?
   userAgent        String?
   ipAddress        String?
   lastUsedAt       DateTime?
@@ -845,6 +854,9 @@ model AuditLog {
   @@index([targetType, targetId])
   @@index([action])
   @@index([createdAt])
+  @@index([adminUserId, createdAt])
+  @@index([action, createdAt])
+  @@index([targetType, createdAt])
 }
 
 // ---------------------------------------------------------------------------
