@@ -201,18 +201,42 @@ export class AdminAuthService {
 
     const matches = await this.tokens.compareRefresh(dto.refreshToken, session.refreshTokenHash);
     if (!matches) {
+      const isPredecessorReplay = session.refreshPreviousTokenHash
+        ? await this.tokens.compareRefresh(dto.refreshToken, session.refreshPreviousTokenHash)
+        : false;
+      if (isPredecessorReplay) {
+        await this.prisma.adminSession.updateMany({
+          where: { id: session.id, refreshTokenHash: session.refreshTokenHash, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+      }
       throw new UnauthorizedException('Invalid refresh token');
     }
 
     const issued = await this.tokens.issue(admin.id, session.id);
-    await this.prisma.adminSession.update({
-      where: { id: session.id },
+    const rotated = await this.prisma.adminSession.updateMany({
+      where: {
+        id: session.id,
+        refreshTokenHash: session.refreshTokenHash,
+        revokedAt: null,
+      },
       data: {
         refreshTokenHash: issued.refreshTokenHash,
+        refreshPreviousTokenHash: session.refreshTokenHash,
         expiresAt: issued.expiresAt,
         lastUsedAt: new Date(),
       },
     });
+    if (rotated.count !== 1) {
+      // The hash changed after our read: the presented token was concurrently
+      // used or replayed. Revoke the entire admin session rather than allowing
+      // either branch of a stolen-token race to survive.
+      await this.prisma.adminSession.updateMany({
+        where: { id: session.id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      throw new UnauthorizedException('Invalid refresh token');
+    }
     await this.audit.record({
       actorAdminUserId: admin.id,
       action: 'admin.auth.refresh',
@@ -231,36 +255,40 @@ export class AdminAuthService {
 
   /** Revokes the caller's current session. */
   async logout(auth: AuthAdmin, ctx: AdminRequestContext): Promise<void> {
-    await this.prisma.adminSession.updateMany({
-      where: { id: auth.sessionId, revokedAt: null },
-      data: { revokedAt: new Date() },
-    });
-    await this.audit.record({
-      actorAdminUserId: auth.adminUserId,
-      action: 'admin.auth.logout',
-      targetType: 'AdminSession',
-      targetId: auth.sessionId,
-      result: AuditResult.Success,
-      ipAddress: ctx.ipAddress,
-      userAgent: ctx.userAgent,
+    await this.prisma.$transaction(async (tx) => {
+      await tx.adminSession.updateMany({
+        where: { id: auth.sessionId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      await this.audit.buildRecordWith(tx, {
+        actorAdminUserId: auth.adminUserId,
+        action: 'admin.auth.logout',
+        targetType: 'AdminSession',
+        targetId: auth.sessionId,
+        result: AuditResult.Success,
+        ipAddress: ctx.ipAddress,
+        userAgent: ctx.userAgent,
+      });
     });
   }
 
   /** Revokes every live session for the caller — "log out everywhere". */
   async logoutAll(auth: AuthAdmin, ctx: AdminRequestContext): Promise<void> {
-    const result = await this.prisma.adminSession.updateMany({
-      where: { adminUserId: auth.adminUserId, revokedAt: null },
-      data: { revokedAt: new Date() },
-    });
-    await this.audit.record({
-      actorAdminUserId: auth.adminUserId,
-      action: 'admin.auth.logout_all',
-      targetType: 'AdminUser',
-      targetId: auth.adminUserId,
-      newValue: { revokedSessions: result.count },
-      result: AuditResult.Success,
-      ipAddress: ctx.ipAddress,
-      userAgent: ctx.userAgent,
+    await this.prisma.$transaction(async (tx) => {
+      const result = await tx.adminSession.updateMany({
+        where: { adminUserId: auth.adminUserId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      await this.audit.buildRecordWith(tx, {
+        actorAdminUserId: auth.adminUserId,
+        action: 'admin.auth.logout_all',
+        targetType: 'AdminUser',
+        targetId: auth.adminUserId,
+        newValue: { revokedSessions: result.count },
+        result: AuditResult.Success,
+        ipAddress: ctx.ipAddress,
+        userAgent: ctx.userAgent,
+      });
     });
   }
 
@@ -285,17 +313,19 @@ export class AdminAuthService {
   /** Starts MFA enrollment for the authenticated admin (generates + stores an encrypted secret). */
   async setupMfa(auth: AuthAdmin, ctx: AdminRequestContext) {
     const admin = await this.loadAdmin(auth.adminUserId);
-    const result = await this.mfa.setup(admin);
-    await this.audit.record({
-      actorAdminUserId: admin.id,
-      action: 'admin.auth.mfa.setup',
-      targetType: 'AdminUser',
-      targetId: admin.id,
-      result: AuditResult.Success,
-      ipAddress: ctx.ipAddress,
-      userAgent: ctx.userAgent,
+    return this.prisma.$transaction(async (tx) => {
+      const result = await this.mfa.setup(admin, tx);
+      await this.audit.buildRecordWith(tx, {
+        actorAdminUserId: admin.id,
+        action: 'admin.auth.mfa.setup',
+        targetType: 'AdminUser',
+        targetId: admin.id,
+        result: AuditResult.Success,
+        ipAddress: ctx.ipAddress,
+        userAgent: ctx.userAgent,
+      });
+      return result;
     });
-    return result;
   }
 
   /** Confirms the first TOTP code, enables MFA, and returns one-time recovery codes. */
@@ -305,16 +335,17 @@ export class AdminAuthService {
     ctx: AdminRequestContext,
   ): Promise<{ recoveryCodes: string[] }> {
     const admin = await this.loadAdmin(auth.adminUserId);
-    const recoveryCodes = await this.mfa.verifyAndEnable(admin, code);
-    await this.audit.record({
-      actorAdminUserId: admin.id,
-      action: 'admin.auth.mfa.verify',
-      targetType: 'AdminUser',
-      targetId: admin.id,
-      result: AuditResult.Success,
-      ipAddress: ctx.ipAddress,
-      userAgent: ctx.userAgent,
-    });
+    const recoveryCodes = await this.mfa.verifyAndEnable(admin, code, undefined, (tx) =>
+      this.audit.buildRecordWith(tx, {
+        actorAdminUserId: admin.id,
+        action: 'admin.auth.mfa.verify',
+        targetType: 'AdminUser',
+        targetId: admin.id,
+        result: AuditResult.Success,
+        ipAddress: ctx.ipAddress,
+        userAgent: ctx.userAgent,
+      }),
+    );
     return { recoveryCodes };
   }
 

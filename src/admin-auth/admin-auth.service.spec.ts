@@ -57,7 +57,7 @@ describe('AdminAuthService', () => {
   let tokens: { issue: jest.Mock; verifyRefresh: jest.Mock; compareRefresh: jest.Mock };
   let mfa: { verifyLoginCode: jest.Mock; setup: jest.Mock; verifyAndEnable: jest.Mock };
   let lockout: { isLocked: jest.Mock; recordFailure: jest.Mock; recordSuccess: jest.Mock };
-  let audit: { record: jest.Mock };
+  let audit: { record: jest.Mock; buildRecordWith: jest.Mock };
   let email: { sendAdminPasswordReset: jest.Mock };
   let service: AdminAuthService;
 
@@ -69,9 +69,12 @@ describe('AdminAuthService', () => {
         findUnique: jest.fn(),
         findMany: jest.fn(),
         update: jest.fn(),
-        updateMany: jest.fn().mockResolvedValue({ count: 2 }),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
-      $transaction: jest.fn().mockResolvedValue([]),
+      $transaction: jest.fn().mockImplementation(async (input: unknown) => {
+        if (typeof input === 'function') return (input as (tx: typeof prisma) => unknown)(prisma);
+        return [];
+      }),
     };
     redis = { set: jest.fn(), get: jest.fn(), del: jest.fn() };
     tokens = {
@@ -85,7 +88,10 @@ describe('AdminAuthService', () => {
       recordFailure: jest.fn(),
       recordSuccess: jest.fn(),
     };
-    audit = { record: jest.fn().mockResolvedValue(undefined) };
+    audit = {
+      record: jest.fn().mockResolvedValue(undefined),
+      buildRecordWith: jest.fn().mockResolvedValue(undefined),
+    };
     email = { sendAdminPasswordReset: jest.fn() };
     service = new AdminAuthService(
       prisma as unknown as PrismaService,
@@ -236,7 +242,67 @@ describe('AdminAuthService', () => {
       const res = await service.refresh(dto, CTX);
       expect(res.accessToken).toBe('access');
       expect(tokens.issue).toHaveBeenCalledWith('admin-1', 'session-1');
-      expect(prisma.adminSession.update).toHaveBeenCalled();
+      expect(prisma.adminSession.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ refreshTokenHash: 'hash', revokedAt: null }),
+        }),
+      );
+    });
+
+    it('revokes the session when a concurrent refresh wins the compare-and-swap', async () => {
+      tokens.verifyRefresh.mockResolvedValue({ sub: 'admin-1', sid: 'session-1' });
+      prisma.adminSession.findUnique.mockResolvedValue({
+        id: 'session-1',
+        adminUserId: 'admin-1',
+        revokedAt: null,
+        expiresAt: new Date(Date.now() + 10000),
+        refreshTokenHash: 'hash',
+        adminUser: adminRow(),
+      });
+      tokens.compareRefresh.mockResolvedValue(true);
+      prisma.adminSession.updateMany
+        .mockResolvedValueOnce({ count: 0 })
+        .mockResolvedValueOnce({ count: 1 });
+      await expect(service.refresh(dto, CTX)).rejects.toThrow('Invalid refresh token');
+      expect(prisma.adminSession.updateMany).toHaveBeenLastCalledWith({
+        where: { id: 'session-1', revokedAt: null },
+        data: { revokedAt: expect.any(Date) },
+      });
+    });
+
+    it('revokes the session when its immediate predecessor is replayed sequentially', async () => {
+      tokens.verifyRefresh.mockResolvedValue({ sub: 'admin-1', sid: 'session-1' });
+      prisma.adminSession.findUnique.mockResolvedValue({
+        id: 'session-1',
+        adminUserId: 'admin-1',
+        revokedAt: null,
+        expiresAt: new Date(Date.now() + 10000),
+        refreshTokenHash: 'current-hash',
+        refreshPreviousTokenHash: 'previous-hash',
+        adminUser: adminRow(),
+      });
+      tokens.compareRefresh.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+      await expect(service.refresh(dto, CTX)).rejects.toThrow('Invalid refresh token');
+      expect(prisma.adminSession.updateMany).toHaveBeenCalledWith({
+        where: { id: 'session-1', refreshTokenHash: 'current-hash', revokedAt: null },
+        data: { revokedAt: expect.any(Date) },
+      });
+    });
+
+    it('does not revoke a session for arbitrary invalid token material', async () => {
+      tokens.verifyRefresh.mockResolvedValue({ sub: 'admin-1', sid: 'session-1' });
+      prisma.adminSession.findUnique.mockResolvedValue({
+        id: 'session-1',
+        adminUserId: 'admin-1',
+        revokedAt: null,
+        expiresAt: new Date(Date.now() + 10000),
+        refreshTokenHash: 'current-hash',
+        refreshPreviousTokenHash: 'previous-hash',
+        adminUser: adminRow(),
+      });
+      tokens.compareRefresh.mockResolvedValue(false);
+      await expect(service.refresh(dto, CTX)).rejects.toThrow('Invalid refresh token');
+      expect(prisma.adminSession.updateMany).not.toHaveBeenCalled();
     });
   });
 
@@ -384,7 +450,8 @@ describe('AdminAuthService', () => {
       mfa.setup.mockResolvedValue({ secret: 's', otpauthUrl: 'u' });
       const res = await service.setupMfa(auth, CTX);
       expect(res.secret).toBe('s');
-      expect(audit.record).toHaveBeenCalledWith(
+      expect(audit.buildRecordWith).toHaveBeenCalledWith(
+        prisma,
         expect.objectContaining({ action: 'admin.auth.mfa.setup' }),
       );
     });

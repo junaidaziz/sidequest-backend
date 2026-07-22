@@ -53,6 +53,7 @@ function buildUser(overrides: Partial<User> = {}): User {
     email: 'ada@example.com',
     passwordHash: 'hashed-password',
     refreshTokenHash: null,
+    refreshPreviousTokenHash: null,
     googleId: null,
     displayName: 'Ada',
     avatarUrl: null,
@@ -80,6 +81,7 @@ describe('AuthService', () => {
       create: jest.Mock;
       findUnique: jest.Mock;
       update: jest.Mock;
+      updateMany: jest.Mock;
     };
     completion: { findMany: jest.Mock; updateMany: jest.Mock };
     userTaskAttachment: { findMany: jest.Mock; updateMany: jest.Mock };
@@ -103,6 +105,7 @@ describe('AuthService', () => {
         create: jest.fn(),
         findUnique: jest.fn(),
         update: jest.fn().mockResolvedValue(buildUser()),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
       completion: {
         findMany: jest.fn().mockResolvedValue([]),
@@ -531,7 +534,7 @@ describe('AuthService', () => {
       expect(prisma.user.update).toHaveBeenCalledTimes(1);
       expect(prisma.user.update).toHaveBeenCalledWith({
         where: { id: 'gu-1' },
-        data: { refreshTokenHash: expect.any(String) },
+        data: { refreshTokenHash: expect.any(String), refreshPreviousTokenHash: null },
       });
       expect(prisma.user.create).not.toHaveBeenCalled();
       expect(result).toEqual({
@@ -940,7 +943,11 @@ describe('AuthService', () => {
           avatarUrl: null,
         },
       });
-      expect(prisma.user.update).toHaveBeenCalled();
+      expect(prisma.user.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ refreshTokenHash: 'stored-hash' }),
+        }),
+      );
     });
 
     it('throws when the refresh token signature is invalid', async () => {
@@ -949,6 +956,69 @@ describe('AuthService', () => {
       await expect(service.refresh({ refreshToken: 'bad' })).rejects.toBeInstanceOf(
         UnauthorizedException,
       );
+    });
+
+    it('revokes the refresh family when a concurrent refresh wins the compare-and-swap', async () => {
+      jwtService.verifyAsync.mockResolvedValue({
+        sub: 'user-1',
+        isGuest: false,
+        type: TokenType.Refresh,
+      });
+      prisma.user.findUnique.mockResolvedValue(buildUser({ refreshTokenHash: 'stored-hash' }));
+      bcryptCompare.mockResolvedValue(true);
+      prisma.user.updateMany
+        .mockResolvedValueOnce({ count: 0 })
+        .mockResolvedValueOnce({ count: 1 });
+
+      await expect(service.refresh({ refreshToken: 'valid.refresh.token' })).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+      expect(prisma.user.updateMany).toHaveBeenLastCalledWith({
+        where: { id: 'user-1' },
+        data: { refreshTokenHash: null, refreshPreviousTokenHash: null },
+      });
+    });
+
+    it('revokes the family when the immediate predecessor is replayed sequentially', async () => {
+      jwtService.verifyAsync.mockResolvedValue({
+        sub: 'user-1',
+        isGuest: false,
+        type: TokenType.Refresh,
+      });
+      prisma.user.findUnique.mockResolvedValue(
+        buildUser({
+          refreshTokenHash: 'current-hash',
+          refreshPreviousTokenHash: 'previous-hash',
+        }),
+      );
+      bcryptCompare.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+
+      await expect(service.refresh({ refreshToken: 'rotated.token' })).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+      expect(prisma.user.updateMany).toHaveBeenCalledWith({
+        where: { id: 'user-1', refreshTokenHash: 'current-hash' },
+        data: { refreshTokenHash: null, refreshPreviousTokenHash: null },
+      });
+    });
+
+    it('does not revoke the family for arbitrary invalid token material', async () => {
+      jwtService.verifyAsync.mockResolvedValue({
+        sub: 'user-1',
+        isGuest: false,
+        type: TokenType.Refresh,
+      });
+      prisma.user.findUnique.mockResolvedValue(
+        buildUser({
+          refreshTokenHash: 'current-hash',
+          refreshPreviousTokenHash: 'previous-hash',
+        }),
+      );
+      bcryptCompare.mockResolvedValue(false);
+      await expect(service.refresh({ refreshToken: 'invalid.token' })).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+      expect(prisma.user.updateMany).not.toHaveBeenCalled();
     });
 
     it('throws when the token is an access token, not a refresh token', async () => {
@@ -1018,7 +1088,7 @@ describe('AuthService', () => {
 
       expect(prisma.user.update).toHaveBeenCalledWith({
         where: { id: 'user-1' },
-        data: { refreshTokenHash: null },
+        data: { refreshTokenHash: null, refreshPreviousTokenHash: null },
       });
       expect(result).toEqual({ success: true });
       // No push token supplied => no deregistration attempted.

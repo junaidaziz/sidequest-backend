@@ -149,6 +149,7 @@ export class AuthService {
               displayName: dto.displayName ?? guest.displayName,
               isGuest: false,
               refreshTokenHash,
+              refreshPreviousTokenHash: null,
             },
           });
           this.logger.log(`Guest ${guest.id} upgraded to full account`);
@@ -167,6 +168,7 @@ export class AuthService {
           displayName: dto.displayName ?? null,
           isGuest: false,
           refreshTokenHash,
+          refreshPreviousTokenHash: null,
         },
       });
       this.logger.log(`New account created: ${id}`);
@@ -247,6 +249,7 @@ export class AuthService {
             isGuest: false,
             displayName: byEmail.displayName ?? displayName,
             refreshTokenHash,
+            refreshPreviousTokenHash: null,
           },
         });
         this.logger.log(`Existing account ${linked.id} linked to Google`);
@@ -273,6 +276,7 @@ export class AuthService {
               displayName: guest.displayName ?? displayName,
               isGuest: false,
               refreshTokenHash,
+              refreshPreviousTokenHash: null,
             },
           });
           this.logger.log(`Guest ${guest.id} upgraded to full account via Google`);
@@ -293,6 +297,7 @@ export class AuthService {
           isGuest: false,
           passwordHash: null,
           refreshTokenHash,
+          refreshPreviousTokenHash: null,
         },
       });
       this.logger.log(`New account created via Google: ${id}`);
@@ -362,10 +367,41 @@ export class AuthService {
 
     const tokenMatches = await bcrypt.compare(this.digest(dto.refreshToken), user.refreshTokenHash);
     if (!tokenMatches) {
+      // Only a cryptographic match against the retained predecessor is treated
+      // as replay. Arbitrary invalid tokens cannot revoke another user's family.
+      const isPredecessorReplay = user.refreshPreviousTokenHash
+        ? await bcrypt.compare(this.digest(dto.refreshToken), user.refreshPreviousTokenHash)
+        : false;
+      if (isPredecessorReplay) {
+        await this.prisma.user.updateMany({
+          where: { id: user.id, refreshTokenHash: user.refreshTokenHash },
+          data: { refreshTokenHash: null, refreshPreviousTokenHash: null },
+        });
+      }
       throw new UnauthorizedException(INVALID_REFRESH_ERROR);
     }
 
-    const tokens = await this.persistTokens(user.id, user.isGuest);
+    const issued = await this.buildTokenSet(user.id, user.isGuest);
+    const rotated = await this.prisma.user.updateMany({
+      where: {
+        id: user.id,
+        refreshTokenHash: user.refreshTokenHash,
+        deletedAt: null,
+        suspendedAt: null,
+      },
+      data: {
+        refreshTokenHash: issued.refreshTokenHash,
+        refreshPreviousTokenHash: user.refreshTokenHash,
+      },
+    });
+    if (rotated.count !== 1) {
+      await this.prisma.user.updateMany({
+        where: { id: user.id },
+        data: { refreshTokenHash: null, refreshPreviousTokenHash: null },
+      });
+      throw new UnauthorizedException(INVALID_REFRESH_ERROR);
+    }
+    const tokens = { accessToken: issued.accessToken, refreshToken: issued.refreshToken };
     return { ...tokens, user: await this.toProfile(user) };
   }
 
@@ -382,7 +418,7 @@ export class AuthService {
   async logout(userId: string, pushToken?: string): Promise<LogoutResponseDto> {
     await this.prisma.user.update({
       where: { id: userId },
-      data: { refreshTokenHash: null },
+      data: { refreshTokenHash: null, refreshPreviousTokenHash: null },
     });
     this.logger.log(`Refresh token revoked on logout: ${userId}`);
 
@@ -651,7 +687,7 @@ export class AuthService {
     );
     await this.prisma.user.update({
       where: { id: userId },
-      data: { refreshTokenHash },
+      data: { refreshTokenHash, refreshPreviousTokenHash: null },
     });
     return { accessToken, refreshToken };
   }
