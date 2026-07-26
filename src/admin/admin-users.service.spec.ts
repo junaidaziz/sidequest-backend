@@ -4,6 +4,7 @@ import { AuthService } from '../auth/auth.service';
 import { AuditLogService } from '../audit-log/audit-log.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
+import { MediaService } from '../media/media.service';
 import { AdminUserActionContext, AdminUsersService } from './admin-users.service';
 import { RestrictableFeature, UserAccountStatus } from './admin-users.constants';
 import { ListUsersQueryDto } from './dto/list-users-query.dto';
@@ -18,6 +19,7 @@ function buildUser(overrides: Partial<User> = {}): User {
     googleId: null,
     displayName: 'Ada',
     avatarUrl: null,
+    avatarMediaId: null,
     stripeCustomerId: null,
     isGuest: false,
     totalXp: 250,
@@ -57,6 +59,7 @@ describe('AdminUsersService', () => {
   let audit: { record: jest.Mock };
   let storage: { getSignedDownloadUrl: jest.Mock };
   let authService: { anonymizeUserAccount: jest.Mock };
+  let media: { resolveVariantsForAsset: jest.Mock };
   let tx: { $queryRaw: jest.Mock; $executeRaw: jest.Mock; completion: { update: jest.Mock } };
 
   beforeEach(() => {
@@ -89,12 +92,14 @@ describe('AdminUsersService', () => {
     audit = { record: jest.fn().mockResolvedValue(undefined) };
     storage = { getSignedDownloadUrl: jest.fn().mockResolvedValue('https://signed/url') };
     authService = { anonymizeUserAccount: jest.fn().mockResolvedValue(undefined) };
+    media = { resolveVariantsForAsset: jest.fn().mockResolvedValue([]) };
 
     service = new AdminUsersService(
       prisma as unknown as PrismaService,
       audit as unknown as AuditLogService,
       storage as unknown as StorageService,
       authService as unknown as AuthService,
+      media as unknown as MediaService,
     );
   });
 
@@ -282,6 +287,22 @@ describe('AdminUsersService', () => {
       const detail = await service.getDetail('user-1');
       expect(detail.proofHistory[0].proofUrl).toBeNull();
       expect(detail.avatarUrl).toBeNull();
+    });
+
+    it('resolves a media-pipeline avatar (avatarMediaId) instead of showing null', async () => {
+      prisma.user.findUnique.mockResolvedValue(
+        buildUser({ avatarUrl: null, avatarMediaId: 'media-1' }),
+      );
+      media.resolveVariantsForAsset.mockResolvedValue([
+        { name: 'sm', url: 'https://cdn.example/sm.webp', width: 150, height: 150, format: 'webp' },
+        { name: 'lg', url: 'https://cdn.example/lg.webp', width: 320, height: 320, format: 'webp' },
+      ]);
+
+      const detail = await service.getDetail('user-1');
+
+      expect(media.resolveVariantsForAsset).toHaveBeenCalledWith('media-1');
+      expect(detail.avatarUrl).toBe('https://cdn.example/lg.webp');
+      expect(storage.getSignedDownloadUrl).not.toHaveBeenCalled();
     });
   });
 
@@ -483,7 +504,7 @@ describe('AdminUsersService', () => {
 
       await service.deleteUser('user-1', 'gdpr request', CTX);
 
-      expect(authService.anonymizeUserAccount).toHaveBeenCalledWith('user-1', 'a/b.png');
+      expect(authService.anonymizeUserAccount).toHaveBeenCalledWith('user-1', 'a/b.png', null);
       expect(audit.record).toHaveBeenCalledWith(
         expect.objectContaining({ action: 'users.delete', targetId: 'user-1' }),
       );
