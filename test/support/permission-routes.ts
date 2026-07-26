@@ -15,6 +15,7 @@ import { AuthController } from '../../src/auth/auth.controller';
 import { UsersController } from '../../src/users/users.controller';
 import { MissionsController } from '../../src/missions/missions.controller';
 import { ProofController } from '../../src/proof/proof.controller';
+import { MediaController } from '../../src/media/media.controller';
 import { HomeController } from '../../src/home/home.controller';
 import { PaymentController } from '../../src/payment/payment.controller';
 import { TasksController } from '../../src/tasks/tasks.controller';
@@ -47,6 +48,7 @@ export const ALL_CONTROLLERS: Type<unknown>[] = [
   UsersController,
   MissionsController,
   ProofController,
+  MediaController,
   HomeController,
   PaymentController,
   TasksController,
