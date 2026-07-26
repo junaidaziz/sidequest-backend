@@ -13,6 +13,7 @@ import { createHash, randomUUID } from 'crypto';
 import { OAuth2Client } from 'google-auth-library';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
+import { MediaService } from '../media/media.service';
 import { ReferralsService } from '../referrals/referrals.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AuthResponseDto } from './dto/auth-response.dto';
@@ -84,6 +85,7 @@ export class AuthService {
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
     private readonly storage: StorageService,
+    private readonly media: MediaService,
     private readonly referrals: ReferralsService,
     private readonly notifications: NotificationsService,
     config: ConfigService,
@@ -556,7 +558,7 @@ export class AuthService {
       );
     }
 
-    await this.anonymizeUserAccount(userId, user.avatarUrl);
+    await this.anonymizeUserAccount(userId, user.avatarUrl, user.avatarMediaId);
     return { success: true };
   }
 
@@ -570,10 +572,17 @@ export class AuthService {
    * permission-gated + audited). Caller is responsible for confirming the row
    * exists and is not already deleted before invoking this.
    *
-   * `avatarKey` is passed in (rather than re-read) so this method makes no extra
-   * `user.findUnique` round trip — the caller already has the row in hand.
+   * `avatarKey`/`avatarMediaId` are passed in (rather than re-read) so this
+   * method makes no extra `user.findUnique` round trip — the caller already
+   * has the row in hand. Exactly one of the two is normally set (see
+   * UsersService's doc comment on why the pair is kept mutually exclusive),
+   * but both are handled independently regardless.
    */
-  async anonymizeUserAccount(userId: string, avatarKey: string | null): Promise<void> {
+  async anonymizeUserAccount(
+    userId: string,
+    avatarKey: string | null,
+    avatarMediaId: string | null,
+  ): Promise<void> {
     // Soft-delete + anonymize + de-reference media pointers atomically. Media
     // keys are collected before nulling so the S3 objects can be cleaned up
     // after the commit.
@@ -602,6 +611,7 @@ export class AuthService {
           refreshTokenHash: null,
           displayName: DELETED_DISPLAY_NAME,
           avatarUrl: null,
+          avatarMediaId: null,
         },
       });
       if (proofKeys.length > 0) {
@@ -635,6 +645,18 @@ export class AuthService {
             (error instanceof Error ? error.message : 'unknown error'),
         );
       }
+    }
+
+    // Same best-effort treatment for a media-pipeline avatar: the DB pointer
+    // is already nulled above, so a failure here only orphans the asset
+    // (logged), never leaves a live reference to it.
+    if (avatarMediaId) {
+      await this.media.deleteMedia(userId, avatarMediaId).catch((error) => {
+        this.logger.warn(
+          `Failed to delete avatar media asset ${avatarMediaId} for deleted user ${userId}: ` +
+            (error instanceof Error ? error.message : 'unknown error'),
+        );
+      });
     }
 
     // Deregister every device push token (Decision 7). Isolated in its own
@@ -808,19 +830,35 @@ export class AuthService {
   }
 
   /**
-   * Projects a User row to the public-safe profile, resolving `avatarUrl` from a
-   * stored S3 object key to a short-lived presigned GET URL (null when unset) —
-   * the same read-time-resolution convention ProofService uses for `proofUrl`,
-   * so the raw key is never exposed. Async because the presign is an I/O call;
-   * every call site awaits it.
+   * Projects a User row to the public-safe profile. Avatar resolution prefers
+   * the media pipeline: when `avatarMediaId` is set, its ready variants are
+   * resolved and the largest becomes `avatarUrl` (so old clients that only
+   * read `avatarUrl` keep working unchanged); `avatarVariants` additionally
+   * exposes every size for responsive rendering. Falls back to the legacy
+   * `avatarUrl` S3-key-to-presigned-URL resolution when no media asset is
+   * set — the two pointers are kept mutually exclusive by UsersService (see
+   * uploadAvatar/setAvatarFromMedia), but this method tolerates either state
+   * independently rather than assuming that invariant holds. Async because
+   * both resolution paths are I/O calls; every call site awaits it.
    */
   private async toProfile(user: User): Promise<UserProfileDto> {
+    let avatarUrl: string | null = null;
+    let avatarVariants: UserProfileDto['avatarVariants'] = [];
+
+    if (user.avatarMediaId) {
+      avatarVariants = await this.media.resolveVariantsForAsset(user.avatarMediaId);
+      avatarUrl = avatarVariants.length > 0 ? avatarVariants[avatarVariants.length - 1].url : null;
+    } else if (user.avatarUrl) {
+      avatarUrl = await this.storage.getSignedDownloadUrl(user.avatarUrl);
+    }
+
     return {
       id: user.id,
       email: user.email,
       displayName: user.displayName,
       isGuest: user.isGuest,
-      avatarUrl: user.avatarUrl ? await this.storage.getSignedDownloadUrl(user.avatarUrl) : null,
+      avatarUrl,
+      avatarVariants,
     };
   }
 }
