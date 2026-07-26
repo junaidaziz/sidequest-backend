@@ -15,6 +15,7 @@ function buildUser(overrides: Partial<User> = {}): User {
     googleId: null,
     displayName: 'Ada',
     avatarUrl: null,
+    avatarMediaId: null,
     stripeCustomerId: null,
     isGuest: false,
     totalXp: 0,
