@@ -13,11 +13,13 @@ This document is written from the actual codebase as of 2026-07-16, not from ear
 - Runtime: Node.js, TypeScript, NestJS 11 (modular monolith — one deployable, feature modules under `src/`)
 - Database: PostgreSQL via Prisma 5, hosted on **Railway** (not Supabase)
 - Cache / rate-limit backing store: Redis via `ioredis`, hosted on **Railway** (not Upstash). `@nest-lab/throttler-storage-redis` backs the global throttler.
-- Queues: `bullmq` + `@nestjs/bullmq`, one connection (`BullModule.forRootAsync`, parsed from `REDIS_URL`), **two queues actively in use** — not unused infrastructure:
+- Queues: `bullmq` + `@nestjs/bullmq`, one connection (`BullModule.forRootAsync`, parsed from `REDIS_URL`), **three queues actively in use** — not unused infrastructure:
   - `verification` — delayed auto-approve job for a Pending proof completion.
   - `notifications` — push-send + push-receipt-check jobs.
+  - `media-processing` — variant-generation job for a confirmed media-pipeline upload.
   - See "Background jobs" below for the full producer/consumer wiring.
 - Object storage: AWS S3 (`@aws-sdk/client-s3`, `@aws-sdk/s3-request-presigner`) — **not Cloudflare R2**. `src/storage/storage.service.ts` is endpoint-configurable so the same code runs against a local LocalStack container in dev (`S3_ENDPOINT` set, path-style addressing) and real AWS S3 in production (`S3_ENDPOINT` unset).
+- Image processing: `sharp`, used only by `src/media/media-processing.processor.ts` to generate responsive variants of a media-pipeline upload (resize, auto-orient + strip EXIF, re-encode to WebP). See "Media pipeline" below.
 - Payments: Stripe (`stripe` Node SDK), wrapped by `src/payment/stripe.service.ts`. **SetupIntent + saved-card management only — there is no charge/checkout flow anywhere in this codebase.**
 - Push delivery: Expo push service (`expo-server-sdk`), wrapped by `src/notifications/*` behind a `PushProviderClient` interface (DI token `PUSH_PROVIDER_CLIENT`) — not FCM/APNs directly.
 - Auth: custom JWT (`@nestjs/jwt` + `passport-jwt`), **not Firebase Auth**. Google Sign-In is verified server-side against Google's own token endpoint via `google-auth-library`'s `OAuth2Client.verifyIdToken` — this was a deliberate divergence from an earlier plan that assumed Firebase; there is no `GoogleService-Info.plist`/Firebase project on the backend (the mobile app does now have Firebase, added 2026-07-16, for Analytics/Crashlytics/push token acquisition only — see `mobileApp/CLAUDE.md`).
@@ -55,6 +57,17 @@ Cross-cutting **reserve-then-execute** pattern, not the more common execute-then
 - **`Notification`** / `NotificationType` (`task_assigned`\|`task_accepted`\|`task_declined`\|`task_submitted`\|`task_approved`\|`task_rejected`\|`referral_registered`\|`referral_reward_earned`\|`account_event`) — one row per recipient per event, written synchronously; push delivery is a best-effort side effect enqueued separately (see "Background jobs").
 - **`PushToken`** — one row per device per user (`@@unique([userId, token])`), `platform` (`ios`\|`android`), `disabledAt` set when the push provider reports the token invalid (`DeviceNotRegistered`) rather than deleting the row (keeps audit history).
 - **`NotificationPreference`** — one row per user; **absence of a row means all-enabled**, not all-disabled — don't invert this default when reading it.
+- **`MediaAsset`** / `MediaPurpose` (`AVATAR`\|`PROOF`\|`TASK_ATTACHMENT`) / `MediaStatus` (`PENDING_UPLOAD`→`UPLOADED`→`PROCESSING`→`READY`\|`FAILED`) / **`MediaVariant`** — the centralized direct-to-S3 media pipeline (see "Media pipeline" below). `User.avatarMediaId`, `Completion.proofMediaId`, `UserTaskAttachment.mediaAssetId` are additive nullable pointers alongside the pre-existing `avatarUrl`/`proofKey`/`objectKey` S3-key columns those models already had — the two pointer styles are **not** both populated for the same logical avatar/proof/attachment at once (see `UsersService` for how the avatar pair is kept mutually exclusive). Only the `AVATAR` purpose is wired to a real endpoint today; `PROOF`/`TASK_ATTACHMENT` are fully implemented in `MediaService` but not yet adopted by `ProofController`/`TasksController`, which still use their original Multer-mediated upload path — don't assume proof/task-evidence uploads go through this pipeline without checking the current state of those controllers.
+
+### Media pipeline (`src/media`)
+
+Direct-to-S3 upload pipeline: the client requests a presigned PUT URL, uploads the original directly to S3 (the backend never sees the bytes for this path), confirms the upload (which triggers a real `HeadObject` re-verification, not a trust-the-client check), and a BullMQ job (`media-processing` queue) then generates every size variant for that `MediaPurpose` via `sharp` — auto-orienting from EXIF before stripping it, re-encoding to WebP, uploading each variant to its own object key, and upserting `MediaVariant` rows idempotently (`@@unique([mediaAssetId, name])`, so a retried job overwrites rather than duplicates). `MediaUrlService` resolves an object key to a delivery URL — a stable CloudFront URL when `MEDIA_CDN_DOMAIN` is set, a short-lived presigned S3 GET URL otherwise (the local-dev default).
+
+- `POST /media/uploads` — authorize an upload (validates MIME/size, authorizes against the purpose's parent entity — see `MediaService.assertAuthorized`'s doc comment for exactly what `relatedEntityId` means per purpose), returns the presigned PUT URL.
+- `POST /media/uploads/:uploadId/complete` — confirm the PUT landed; queues variant generation.
+- `GET /media/:mediaId` / `DELETE /media/:mediaId` — read/delete, owner-scoped (404, not 403, on a non-owned id).
+- `POST /users/me/avatar/media` — the current avatar-set path: points `User.avatarMediaId` at an already-`READY` `AVATAR`-purpose asset, best-effort cleaning up whatever was previously the avatar (on either pointer). `POST /users/me/avatar` (multipart) still exists for backward compatibility and always clears `avatarMediaId` when it runs, so the two paths can't leave both pointers set.
+- `UserProfileDto.avatarVariants` — every ready variant of the current avatar (empty if still processing or on the legacy multipart path); `avatarUrl` is kept populated either way (the largest ready variant's URL, or the legacy presigned URL) so old clients that only read `avatarUrl` keep working unchanged.
 
 ### Endpoints (actual, as of this file's writing — full request/response detail lives in `.claude/contracts/api-contract.md`)
 
@@ -102,15 +115,20 @@ Cross-cutting **reserve-then-execute** pattern, not the more common execute-then
 | GET | `/payment/methods` | JWT | empty array if no Stripe customer yet |
 | DELETE | `/payment/methods/:id` | JWT | ownership-checked (404, not 403, if not the caller's card) |
 | PATCH | `/payment/methods/:id/default` | JWT | |
-| POST | `/users/me/avatar` | JWT, multipart | replaces the current avatar |
-| DELETE | `/users/me/avatar` | JWT | idempotent |
+| POST | `/users/me/avatar` | JWT, multipart | legacy direct-upload path — replaces the current avatar |
+| POST | `/users/me/avatar/media` | JWT | current path — points the avatar at an already-uploaded, `READY` media asset (see "Media pipeline") |
+| DELETE | `/users/me/avatar` | JWT | idempotent; clears whichever avatar pointer is set |
+| POST | `/media/uploads` | JWT | authorize a direct-to-S3 upload, returns a presigned PUT URL |
+| POST | `/media/uploads/:uploadId/complete` | JWT | confirm the upload landed; queues variant generation |
+| GET | `/media/:mediaId` | JWT | owner-scoped read |
+| DELETE | `/media/:mediaId` | JWT | owner-scoped delete |
 | GET | `/referrals/me` | JWT | lazily mints a referral code on first call |
 | POST | `/referrals/invites` | JWT | records best-effort share-channel analytics |
 | GET | `/referrals/history` | JWT | paginated conversion history |
 
 ### Account deletion (`DELETE /auth/me`)
 
-Requires re-authentication (current password, or `confirm: true` for a password-less account). In one transaction: sets `deletedAt`, revokes the refresh token, scrubs `displayName` → `"Deleted User"`, nulls `avatarUrl`, and **de-references** (nulls the pointer, doesn't delete the row) every proof/evidence media key the user owns (`Completion.proofKey`, their `UserTaskAttachment.objectKey`). `email`/`googleId`/`passwordHash` are **retained**, not released for re-registration, in v1. Actual S3 object deletion and push-token deregistration happen after commit, best-effort, isolated per-key so a storage/push failure never undoes the already-committed deletion. Rewards already granted to counterparties (e.g. a referral reward the deleted user triggered for someone else) are never clawed back.
+Requires re-authentication (current password, or `confirm: true` for a password-less account). In one transaction: sets `deletedAt`, revokes the refresh token, scrubs `displayName` → `"Deleted User"`, nulls `avatarUrl` and `avatarMediaId`, and **de-references** (nulls the pointer, doesn't delete the row) every proof/evidence media key the user owns (`Completion.proofKey`, their `UserTaskAttachment.objectKey`). `email`/`googleId`/`passwordHash` are **retained**, not released for re-registration, in v1. Actual S3 object deletion, the owned `MediaAsset` (if the avatar was on the media-pipeline path), and push-token deregistration happen after commit, best-effort, isolated per-key/asset so one failure never undoes the already-committed deletion. Rewards already granted to counterparties (e.g. a referral reward the deleted user triggered for someone else) are never clawed back.
 
 ### Background jobs (BullMQ — actively used, not provisioned-but-idle)
 
@@ -119,6 +137,8 @@ Requires re-authentication (current password, or `confirm: true` for a password-
 **`notifications` queue** — `NotificationsQueueService` enqueues `send-push` (immediate, right after `NotificationsService.notify()` writes the in-app `Notification` row) and `check-receipts` (delayed by `PUSH_RECEIPT_CHECK_DELAY_MINUTES`, default 15min, scheduled by the processor after a successful send). `NotificationsProcessor` loads the recipient's `NotificationPreference` (absence = enabled), filters to non-disabled tokens, sends via `PushProviderClient` (Expo), and immediately disables any token the provider reports as `DeviceNotRegistered`.
 
 Both queues share a convention worth preserving in new background work: try/catch-and-log around every enqueue call (a queue failure must never fail the primary write it's a side effect of), and dash-separated deterministic job ids — **not colons**, which `Job.validateOptions` rejects (hit as a real bug during development).
+
+**`media-processing` queue** — `MediaProcessingQueueService.enqueueGenerateVariants(mediaAssetId)` is called right after `MediaService.confirmUpload` verifies the S3 object landed. Job id is the `mediaAssetId` itself (not a composite string) — BullMQ's own dedupe-by-id is the idempotency guard for a duplicate confirm call. `MediaProcessingProcessor` downloads the original, generates every variant for the asset's `MediaPurpose`, and upserts `MediaVariant` rows before flipping `status` to `READY` (or `FAILED` with a diagnostic reason on error).
 
 There is no `@nestjs/schedule`/cron usage anywhere — all "scheduled" behavior is a BullMQ delayed job.
 
@@ -148,6 +168,8 @@ JWT_SECRET, JWT_ACCESS_TOKEN_TTL, JWT_REFRESH_TOKEN_TTL, GUEST_TOKEN_TTL
 GOOGLE_OAUTH_WEB_CLIENT_ID, GOOGLE_OAUTH_IOS_CLIENT_ID   # OAuth client IDs, not secrets — verified against the ID token's `aud` claim
 THROTTLE_TTL, THROTTLE_LIMIT
 S3_ENDPOINT, S3_FORCE_PATH_STYLE, S3_REGION, S3_BUCKET, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+MEDIA_UPLOAD_URL_TTL_SECONDS               # optional, default 900 (15min) — presigned PUT URL lifetime for the media pipeline
+MEDIA_CDN_DOMAIN                           # optional — stable CDN domain (CloudFront) media variant URLs are served from; unset falls back to presigned S3 GET URLs
 STRIPE_SECRET_KEY                         # required (getOrThrow) — a placeholder/invalid value doesn't crash boot, but every real Stripe call 502s until it's a real key
 STRIPE_WEBHOOK_SECRET                     # RESERVED — not read anywhere in code; no webhook endpoint exists yet
 EXPO_ACCESS_TOKEN                         # optional — Expo push service auth
