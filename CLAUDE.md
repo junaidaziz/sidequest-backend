@@ -8,6 +8,21 @@ SideQuest backend — NestJS API serving the mobile app's mission generator, gue
 
 This document is written from the actual codebase as of 2026-07-16, not from earlier planning material. If you find a discrepancy between this file and the code, the code wins — update this file. (The previous version of this file, dated 2026-07-13, was found to be wrong on nearly every "not implemented" claim — the Tasks, Notifications, Admin/Verification, Payment, and Referrals modules below were all already fully built at that time and simply undocumented. Don't assume a "not implemented" note here is still accurate without checking.)
 
+## Claude configuration map
+
+This file is the deep reference. Everything else Claude Code (or a new contributor) needs lives under `.claude/`:
+
+- `.claude/agents/backend-implementer.md`, `.claude/agents/backend-eval.md` — the implement → independently-review agent pair for new modules/endpoints.
+- `.claude/docs/ONBOARDING.md` — start here if you're new to this repo.
+- `.claude/docs/ARCHITECTURE.md` — where things live, the two separate auth/identity systems (consumer vs. admin), cross-cutting infrastructure.
+- `.claude/docs/CODING_STANDARDS.md` — the rules both agents and human review enforce.
+- `.claude/docs/DEVELOPMENT_GUIDE.md` — local setup, common commands, Prisma workflow.
+- `.claude/docs/QA_PROCESS.md` — the four-layer (Swiss Cheese) review model and the definition of done.
+- `.claude/docs/RELEASE_GUIDE.md` — Railway deploy, pre-release checklist, post-deploy verification.
+- `.claude/workflows/FEATURE_WORKFLOW.md` — spec → implement → QA → review → security → docs → merge.
+- `.claude/references/api-contract.md` — full route inventory, consumer **and** admin platform surfaces (the admin platform — RBAC, CMS, moderation, analytics, campaigns, audit log, app config — is larger than the endpoint table below and is fully inventoried only there).
+- `.claude/references/PRODUCT_CONTEXT.md` — the product framing (core loop, v1 constraints) shared across `backend`, `mobileApp`, and `web`.
+
 ## Stack (as actually installed, not aspirational)
 
 - Runtime: Node.js, TypeScript, NestJS 11 (modular monolith — one deployable, feature modules under `src/`)
@@ -69,7 +84,7 @@ Direct-to-S3 upload pipeline: the client requests a presigned PUT URL, uploads t
 - `POST /users/me/avatar/media` — the current avatar-set path: points `User.avatarMediaId` at an already-`READY` `AVATAR`-purpose asset, best-effort cleaning up whatever was previously the avatar (on either pointer). `POST /users/me/avatar` (multipart) still exists for backward compatibility and always clears `avatarMediaId` when it runs, so the two paths can't leave both pointers set.
 - `UserProfileDto.avatarVariants` — every ready variant of the current avatar (empty if still processing or on the legacy multipart path); `avatarUrl` is kept populated either way (the largest ready variant's URL, or the legacy presigned URL) so old clients that only read `avatarUrl` keep working unchanged.
 
-### Endpoints (actual, as of this file's writing — full request/response detail lives in `.claude/contracts/api-contract.md`)
+### Endpoints (consumer-facing surface only — see "Product-scope conflicts" below for what's absent, and `.claude/references/api-contract.md` for full request/response detail **plus the separate, larger RBAC-gated admin platform surface**, which this table does not attempt to enumerate)
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
@@ -227,4 +242,4 @@ npm run prisma:studio      # Prisma's DB browser GUI
 
 ## Deployment
 
-Railway (Dockerized). Postgres and Redis are Railway-managed add-ons, not external SaaS. GitHub push triggers an auto-deploy. See `docs/backend/Deployment.md` and `docs/deployment/Infrastructure.md` for the full setup — those docs are kept in sync with the real deployment, unlike the planning-stage stack assumptions this file corrects above.
+Railway (Dockerized). Postgres and Redis are Railway-managed add-ons, not external SaaS. GitHub push triggers an auto-deploy. See `.claude/docs/RELEASE_GUIDE.md` for the full deploy runbook, pre-release checklist, and post-deploy verification steps.
