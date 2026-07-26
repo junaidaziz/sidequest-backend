@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  Body,
   Controller,
   Delete,
   HttpCode,
@@ -25,6 +26,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AuthUser } from '../auth/types/jwt-payload.interface';
 import { imageFileFilter } from '../proof/proof.controller';
 import { MAX_AVATAR_PHOTO_BYTES } from '../storage/storage.service';
+import { SetAvatarFromMediaDto } from './dto/set-avatar-from-media.dto';
 import { UsersService } from './users.service';
 
 @ApiTags('users')
@@ -78,6 +80,32 @@ export class UsersController {
       throw new BadRequestException('An avatar image file is required');
     }
     return this.usersService.uploadAvatar(user.userId, avatar);
+  }
+
+  @Post('media')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(JwtAuthGuard)
+  // Matches the multipart upload endpoint's tier — this also does S3/DB
+  // writes (a pointer swap plus best-effort cleanup of whatever it replaces).
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @ApiOperation({
+    summary:
+      "Set the authenticated user's avatar from an already-uploaded, already-processed media asset " +
+      '(the direct-to-S3 pipeline path — see POST /media/uploads)',
+  })
+  @ApiResponse({ status: 200, type: UserProfileDto })
+  @ApiResponse({
+    status: 400,
+    description: 'The media asset is not AVATAR-purpose or is not yet READY',
+  })
+  @ApiResponse({ status: 401, description: 'Missing or invalid access token' })
+  @ApiResponse({ status: 404, description: 'Media asset not found or not owned by the caller' })
+  @ApiResponse({ status: 429, description: 'Too many requests' })
+  setAvatarFromMedia(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: SetAvatarFromMediaDto,
+  ): Promise<UserProfileDto> {
+    return this.usersService.setAvatarFromMedia(user.userId, dto.mediaId);
   }
 
   @Delete()
