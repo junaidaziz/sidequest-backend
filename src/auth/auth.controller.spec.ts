@@ -142,6 +142,7 @@ describe('AuthController', () => {
       displayName: 'Ada',
       isGuest: false,
       avatarUrl: null,
+      avatarVariants: [],
     };
     service.getProfile.mockResolvedValue(profile);
     const user: AuthUser = { userId: 'user-1', email: 'ada@example.com', isGuest: false };
@@ -159,6 +160,7 @@ describe('AuthController', () => {
       displayName: 'New Name',
       isGuest: false,
       avatarUrl: null,
+      avatarVariants: [],
     };
     service.updateDisplayName.mockResolvedValue(profile);
     const user: AuthUser = { userId: 'user-1', email: 'ada@example.com', isGuest: false };
