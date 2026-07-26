@@ -1,12 +1,15 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import { MediaStatus, MediaPurpose } from '@prisma/client';
 import { AuthService } from '../auth/auth.service';
 import { UserProfileDto } from '../auth/dto/user-profile.dto';
+import { MediaService } from '../media/media.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { UsersService } from './users.service';
 
 const USER_ID = 'user-1';
+const MEDIA_ID = 'media-1';
 
 const PROFILE: UserProfileDto = {
   id: USER_ID,
@@ -14,6 +17,7 @@ const PROFILE: UserProfileDto = {
   displayName: 'Ada',
   isGuest: false,
   avatarUrl: 'https://signed.example/avatar',
+  avatarVariants: [],
 };
 
 function pngFile(): Express.Multer.File {
@@ -22,19 +26,26 @@ function pngFile(): Express.Multer.File {
 
 describe('UsersService', () => {
   let service: UsersService;
-  let prisma: { user: { findUnique: jest.Mock; update: jest.Mock } };
+  let prisma: {
+    user: { findUnique: jest.Mock; update: jest.Mock };
+    mediaAsset: { findUnique: jest.Mock };
+  };
   let storage: {
     buildAvatarKey: jest.Mock;
     uploadObject: jest.Mock;
     deleteObject: jest.Mock;
   };
   let authService: { getProfile: jest.Mock };
+  let media: { deleteMedia: jest.Mock };
 
   beforeEach(async () => {
     prisma = {
       user: {
         findUnique: jest.fn(),
         update: jest.fn().mockResolvedValue({}),
+      },
+      mediaAsset: {
+        findUnique: jest.fn(),
       },
     };
     storage = {
@@ -43,12 +54,14 @@ describe('UsersService', () => {
       deleteObject: jest.fn().mockResolvedValue(undefined),
     };
     authService = { getProfile: jest.fn().mockResolvedValue(PROFILE) };
+    media = { deleteMedia: jest.fn().mockResolvedValue(undefined) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         UsersService,
         { provide: PrismaService, useValue: prisma },
         { provide: StorageService, useValue: storage },
+        { provide: MediaService, useValue: media },
         { provide: AuthService, useValue: authService },
       ],
     }).compile();
@@ -72,10 +85,11 @@ describe('UsersService', () => {
       );
       expect(prisma.user.update).toHaveBeenCalledWith({
         where: { id: USER_ID },
-        data: { avatarUrl: 'avatars/user-1/new.png' },
+        data: { avatarUrl: 'avatars/user-1/new.png', avatarMediaId: null },
       });
       // No prior avatar => nothing to clean up.
       expect(storage.deleteObject).not.toHaveBeenCalled();
+      expect(media.deleteMedia).not.toHaveBeenCalled();
       expect(result).toEqual(PROFILE);
     });
 
@@ -130,6 +144,92 @@ describe('UsersService', () => {
         NotFoundException,
       );
       expect(storage.uploadObject).not.toHaveBeenCalled();
+    });
+
+    it('cleans up a stale media-pipeline avatar when replaced via the legacy upload path', async () => {
+      prisma.user.findUnique.mockResolvedValue({ avatarUrl: null, avatarMediaId: MEDIA_ID });
+
+      await service.uploadAvatar(USER_ID, pngFile());
+
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: USER_ID },
+        data: { avatarUrl: 'avatars/user-1/new.png', avatarMediaId: null },
+      });
+      expect(media.deleteMedia).toHaveBeenCalledWith(USER_ID, MEDIA_ID);
+    });
+  });
+
+  describe('setAvatarFromMedia', () => {
+    function readyAvatarAsset(overrides: Record<string, unknown> = {}) {
+      return {
+        id: MEDIA_ID,
+        ownerId: USER_ID,
+        purpose: MediaPurpose.AVATAR,
+        status: MediaStatus.READY,
+        ...overrides,
+      };
+    }
+
+    it('points avatarMediaId at the asset and clears the legacy pointer', async () => {
+      prisma.mediaAsset.findUnique.mockResolvedValue(readyAvatarAsset());
+      prisma.user.findUnique.mockResolvedValue({ avatarUrl: null, avatarMediaId: null });
+
+      const result = await service.setAvatarFromMedia(USER_ID, MEDIA_ID);
+
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: USER_ID },
+        data: { avatarMediaId: MEDIA_ID, avatarUrl: null },
+      });
+      expect(result).toEqual(PROFILE);
+    });
+
+    it('cleans up the previous avatar media asset and legacy object after switching', async () => {
+      prisma.mediaAsset.findUnique.mockResolvedValue(readyAvatarAsset());
+      prisma.user.findUnique.mockResolvedValue({
+        avatarUrl: 'avatars/user-1/old.png',
+        avatarMediaId: 'media-old',
+      });
+
+      await service.setAvatarFromMedia(USER_ID, MEDIA_ID);
+
+      expect(media.deleteMedia).toHaveBeenCalledWith(USER_ID, 'media-old');
+      expect(storage.deleteObject).toHaveBeenCalledWith('avatars/user-1/old.png');
+    });
+
+    it('rejects when the media asset is not owned by the caller', async () => {
+      prisma.mediaAsset.findUnique.mockResolvedValue(readyAvatarAsset({ ownerId: 'someone-else' }));
+
+      await expect(service.setAvatarFromMedia(USER_ID, MEDIA_ID)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+
+    it('rejects a non-AVATAR purpose asset', async () => {
+      prisma.mediaAsset.findUnique.mockResolvedValue(
+        readyAvatarAsset({ purpose: MediaPurpose.PROOF }),
+      );
+
+      await expect(service.setAvatarFromMedia(USER_ID, MEDIA_ID)).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+    });
+
+    it('rejects an asset that is not yet READY', async () => {
+      prisma.mediaAsset.findUnique.mockResolvedValue(
+        readyAvatarAsset({ status: MediaStatus.PROCESSING }),
+      );
+
+      await expect(service.setAvatarFromMedia(USER_ID, MEDIA_ID)).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+    });
+
+    it('throws NotFoundException when the media asset does not exist', async () => {
+      prisma.mediaAsset.findUnique.mockResolvedValue(null);
+
+      await expect(service.setAvatarFromMedia(USER_ID, MEDIA_ID)).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
     });
   });
 
@@ -187,6 +287,19 @@ describe('UsersService', () => {
       prisma.user.findUnique.mockResolvedValue(null);
 
       await expect(service.deleteAvatar(USER_ID)).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('deletes the media asset and nulls avatarMediaId when set via the media pipeline', async () => {
+      prisma.user.findUnique.mockResolvedValue({ avatarUrl: null, avatarMediaId: MEDIA_ID });
+
+      const result = await service.deleteAvatar(USER_ID);
+
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: USER_ID },
+        data: { avatarMediaId: null },
+      });
+      expect(media.deleteMedia).toHaveBeenCalledWith(USER_ID, MEDIA_ID);
+      expect(result).toEqual(PROFILE);
     });
   });
 });
