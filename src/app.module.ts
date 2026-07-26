@@ -32,6 +32,7 @@ import { AdminChallengesModule } from './admin-challenges/admin-challenges.modul
 import { ModerationModule } from './moderation/moderation.module';
 import { NotificationCampaignsModule } from './notification-campaigns/notification-campaigns.module';
 import { AnalyticsModule } from './analytics/analytics.module';
+import { MediaModule } from './media/media.module';
 
 /**
  * `Number(...)` of a non-numeric env value silently produces NaN, which would
@@ -100,6 +101,7 @@ function bullConnectionFromRedisUrl(redisUrl: string): {
     UsersModule,
     MissionsModule,
     StorageModule,
+    MediaModule,
     ProofModule,
     HomeModule,
     VerificationModule,
