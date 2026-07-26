@@ -67,6 +67,16 @@ model User {
   completions  Completion[]
   savedMissions SavedMission[]
 
+  /// Centralized media pipeline. `avatarMediaId` points at the MediaAsset that
+  /// is *currently* the live avatar (at most one at a time — old replaced
+  /// avatars are cleaned up, not left pointed-at). `mediaAssets` is every
+  /// MediaAsset this user has ever owned across all purposes (avatar history,
+  /// proof photos, task-attachment photos) — additive, existing `avatarUrl`
+  /// untouched for backward compatibility during the migration window.
+  avatarMediaId String?     @unique
+  avatarMedia   MediaAsset? @relation("UserAvatarMedia", fields: [avatarMediaId], references: [id])
+  mediaAssets   MediaAsset[] @relation("MediaOwner")
+
   /// Peer-to-peer user-created tasks (M19). Additive back-relations only —
   /// no existing User field is touched by the tasks feature.
   createdTasks        UserTask[]           @relation("TaskCreator")
@@ -282,6 +292,13 @@ model Completion {
   /// Required when verificationStatus is set to Rejected; null otherwise.
   rejectionReason    String?
 
+  /// Centralized media pipeline pointer, additive alongside the existing
+  /// `proofKey` (kept for backward compatibility — see MediaAsset). Null for
+  /// text proofs and for legacy photo proofs uploaded before this field
+  /// existed (identifiable by `proofKey` being set but `proofMediaId` null).
+  proofMediaId String?     @unique
+  proofMedia   MediaAsset? @relation("CompletionProofMedia", fields: [proofMediaId], references: [id])
+
   @@index([userId])
   @@index([verificationStatus])
   @@index([verifiedByAdminId])
@@ -389,6 +406,12 @@ model UserTaskAttachment {
   /// delete. Always set to a real key on creation.
   objectKey    String? // S3 key, resolved to a presigned GET at read time (same as Completion.proofKey)
   createdAt    DateTime           @default(now())
+
+  /// Centralized media pipeline pointer, additive alongside the existing
+  /// `objectKey` (kept for backward compatibility — see MediaAsset). Null for
+  /// legacy attachments uploaded before this field existed.
+  mediaAssetId String?     @unique
+  mediaAsset   MediaAsset? @relation("TaskAttachmentMedia", fields: [mediaAssetId], references: [id])
 
   @@index([submissionId])
 }
@@ -1301,4 +1324,127 @@ model Appeal {
   @@index([moderationActionId])
   @@index([appellantUserId])
   @@index([status])
+}
+
+// ---------------------------------------------------------------------------
+// Centralized media pipeline. Replaces the pattern of one raw S3 object key
+// stored directly on the owning row (User.avatarUrl, Completion.proofKey,
+// UserTaskAttachment.objectKey — all three kept, additive, for backward
+// compatibility) with a reusable asset+variant system: one MediaAsset per
+// upload (the original), with zero or more generated MediaVariant renditions
+// (resized/re-encoded for actual UI usage) once background processing
+// completes. See docs/backend/Media.md for the full architecture, the
+// backfill plan for pre-existing avatarUrl/proofKey/objectKey rows, and the
+// object-key structure convention MediaService follows.
+//
+// Scope is deliberately limited to entities that actually exist in this
+// schema and are actually user-uploaded: avatars, mission proof photos, and
+// task-evidence attachments. CMS assets (CmsScreenshot, CmsTestimonial, etc.)
+// are admin-authored through a different auth/ownership model and are
+// intentionally NOT folded into this system — forcing them into an
+// owner=User shape would misrepresent who actually owns that content.
+// "Challenge cover images", "campaign images", and "achievement images" are
+// NOT modeled here because no such image-bearing entity exists anywhere else
+// in this schema (UserTask has no cover field; NotificationCampaign is a push
+// -notification campaign with no image; achievements are derived client-side
+// in the mobile app with no backend model at all) — do not add MediaPurpose
+// values for concepts that don't have a real owning entity yet.
+// ---------------------------------------------------------------------------
+
+enum MediaPurpose {
+  AVATAR
+  PROOF
+  TASK_ATTACHMENT
+}
+
+/// A MediaAsset moves forward through this pipeline and is never treated as
+/// fully available to render until it reaches READY. FAILED is terminal but
+/// retryable (see MediaProcessingService) — a fresh reprocessing attempt
+/// moves it back to PROCESSING, not a new row.
+enum MediaStatus {
+  PENDING_UPLOAD
+  UPLOADED
+  PROCESSING
+  READY
+  FAILED
+}
+
+/// One uploaded image (the original) plus everything needed to track it
+/// through validation, processing, and delivery. `ownerId` is always the
+/// authenticated user who initiated the upload — for PROOF and
+/// TASK_ATTACHMENT this is the same user who owns the parent Completion /
+/// UserTaskSubmission (enforced by MediaService at authorization time, not
+/// re-derived from the relation), so ownership checks never need a join.
+model MediaAsset {
+  id      String       @id @default(uuid())
+  ownerId String
+  owner   User         @relation("MediaOwner", fields: [ownerId], references: [id])
+  purpose MediaPurpose
+
+  /// Opaque id of the entity this media is FOR, interpreted per `purpose` by
+  /// MediaService's authorization logic — a Mission id for PROOF, a UserTask
+  /// id for TASK_ATTACHMENT (never the Completion/UserTaskSubmission itself,
+  /// which doesn't exist yet at upload time; it's created afterward
+  /// referencing this media asset). Null for AVATAR, which is owner-scoped
+  /// only (no separate parent entity).
+  relatedEntityId String?
+
+  /// S3 object key for the original upload. Never a full URL or presigned
+  /// URL — MediaUrlService resolves a delivery URL from this at read time,
+  /// so the bucket/CDN domain can change without touching any row.
+  originalKey    String
+  originalWidth  Int?
+  originalHeight Int?
+  originalFormat String?
+  originalSize   Int?
+
+  status MediaStatus @default(PENDING_UPLOAD)
+  /// Populated when status is FAILED — an internal diagnostic string, never
+  /// returned to the client (MediaController maps FAILED to a generic
+  /// message). Cleared on a successful reprocessing retry.
+  failureReason String?
+
+  variants MediaVariant[]
+
+  /// Opposite side of User.avatarMediaId — set only while this asset is
+  /// *currently* the live avatar for that user. A user's older, replaced
+  /// avatar MediaAssets have this null (and are scheduled for cleanup) even
+  /// though `owner`/`ownerId` above still points at the same user.
+  currentAvatarForUser User? @relation("UserAvatarMedia")
+  /// Opposite side of Completion.proofMediaId.
+  completion            Completion?         @relation("CompletionProofMedia")
+  /// Opposite side of UserTaskAttachment.mediaAssetId.
+  taskAttachment         UserTaskAttachment? @relation("TaskAttachmentMedia")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([ownerId])
+  @@index([purpose, relatedEntityId])
+  @@index([status])
+}
+
+/// One generated, resized/re-encoded rendition of a MediaAsset's original.
+/// `name` is the variant preset name (e.g. "xs"/"sm"/"md"/"lg" for avatars,
+/// "thumbnail"/"small"/"medium"/"large" for proofs) — see MediaVariantPresets
+/// (media/media-variant-presets.ts) for the authoritative dimensions per
+/// purpose. Unique per (mediaAssetId, name) so a duplicate S3 processing
+/// event can safely upsert instead of creating a second row for the same
+/// rendition (idempotent processing — see MediaProcessingService).
+model MediaVariant {
+  id           String     @id @default(uuid())
+  mediaAssetId String
+  mediaAsset   MediaAsset @relation(fields: [mediaAssetId], references: [id], onDelete: Cascade)
+  name         String
+  objectKey    String
+  width        Int
+  height       Int
+  format       String
+  byteSize     Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([mediaAssetId, name])
+  @@index([mediaAssetId])
 }
