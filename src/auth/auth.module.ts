@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { StorageModule } from '../storage/storage.module';
+import { MediaModule } from '../media/media.module';
 import { ReferralsModule } from '../referrals/referrals.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { AuthController } from './auth.controller';
@@ -15,6 +16,10 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     // StorageService resolves the avatar S3 object key to a presigned GET URL
     // when building UserProfileDto.
     StorageModule,
+    // MediaService resolves User.avatarMediaId's ready variants into
+    // UserProfileDto.avatarVariants. One-directional: AuthModule ->
+    // MediaModule; MediaModule does not import AuthModule.
+    MediaModule,
     // Referral-code attribution at signup / Google sign-in (M20.3). One-
     // directional: AuthModule -> ReferralsModule; ReferralsModule does not
     // import AuthModule, so there is no dependency cycle.
