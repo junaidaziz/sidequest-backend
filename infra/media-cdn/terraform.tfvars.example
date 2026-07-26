@@ -1,0 +1,11 @@
+aws_region        = "us-east-1"
+media_bucket_name = "sidequest-media"
+
+# Leave both empty to launch on the default *.cloudfront.net domain — no ACM
+# certificate needed for that path.
+cdn_domain_name     = ""
+acm_certificate_arn = ""
+
+# Empty by default (safest) — populate only if the Expo web target needs
+# browser-side direct-to-S3 uploads.
+allowed_upload_origins = []
