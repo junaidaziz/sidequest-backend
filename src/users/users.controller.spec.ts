@@ -17,15 +17,17 @@ const PROFILE: UserProfileDto = {
   displayName: 'Ada',
   isGuest: false,
   avatarUrl: 'https://signed.example/avatar',
+  avatarVariants: [],
 };
 
 describe('UsersController', () => {
   let controller: UsersController;
-  let service: { uploadAvatar: jest.Mock; deleteAvatar: jest.Mock };
+  let service: { uploadAvatar: jest.Mock; setAvatarFromMedia: jest.Mock; deleteAvatar: jest.Mock };
 
   beforeEach(async () => {
     service = {
       uploadAvatar: jest.fn().mockResolvedValue(PROFILE),
+      setAvatarFromMedia: jest.fn().mockResolvedValue(PROFILE),
       deleteAvatar: jest.fn().mockResolvedValue({ ...PROFILE, avatarUrl: null }),
     };
 
@@ -50,6 +52,15 @@ describe('UsersController', () => {
     it('rejects a request with no file with a 400 before hitting the service', () => {
       expect(() => controller.uploadAvatar(AUTH_USER, undefined)).toThrow(BadRequestException);
       expect(service.uploadAvatar).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('setAvatarFromMedia', () => {
+    it('forwards the mediaId to the service and returns the profile', async () => {
+      const result = await controller.setAvatarFromMedia(AUTH_USER, { mediaId: 'media-1' });
+
+      expect(service.setAvatarFromMedia).toHaveBeenCalledWith('user-1', 'media-1');
+      expect(result).toEqual(PROFILE);
     });
   });
 
