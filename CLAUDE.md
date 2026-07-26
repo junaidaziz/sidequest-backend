@@ -21,7 +21,7 @@ This file is the deep reference. Everything else Claude Code (or a new contribut
 - `.claude/docs/RELEASE_GUIDE.md` — Railway deploy, pre-release checklist, post-deploy verification.
 - `.claude/workflows/FEATURE_WORKFLOW.md` — spec → implement → QA → review → security → docs → merge.
 - `.claude/references/api-contract.md` — full route inventory, consumer **and** admin platform surfaces (the admin platform — RBAC, CMS, moderation, analytics, campaigns, audit log, app config — is larger than the endpoint table below and is fully inventoried only there).
-- `.claude/references/PRODUCT_CONTEXT.md` — the product framing (core loop, v1 constraints) shared across `backend`, `mobileApp`, and `web`.
+- `.claude/references/sidequest.md` — the product framing (core loop, v1 constraints) shared across `backend`, `mobileApp`, and `web`. Same filename/path convention in every repo — the `backend-implementer`/`rn-implementer` agent family reads `.claude/references/sidequest.md` relative to whichever repo they're invoked from.
 
 ## Stack (as actually installed, not aspirational)
 

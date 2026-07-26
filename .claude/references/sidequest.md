@@ -1,6 +1,6 @@
-# Product Context
+# SideQuest — Project Reference
 
-The product framing every backend feature should be checked against. This is the same core-loop description used in `mobileApp/.claude/references/` and `web/.claude/references/` — kept in sync across all three repos so an agent working in any one of them shares the same mental model of what SideQuest is.
+The product framing every backend feature should be checked against. This is the same core-loop description used in `mobileApp/.claude/references/sidequest.md` and `web/.claude/references/sidequest.md` — kept in sync across all three repos (same filename/path in each) so an agent working in any one of them shares the same mental model of what SideQuest is, and so the `backend-implementer`/`rn-implementer`/`web-implementer` agent family — which reads `.claude/references/sidequest.md` relative to whichever repo it's invoked from — finds it in the same place everywhere.
 
 ## Product
 

@@ -13,7 +13,7 @@ Project-scoped copy of this repo's implementer agent — committed to `backend/.
 ## Workflow — execute in strict order, never skip steps
 
 ### Step 1 · Analyze the spec
-Read the feature brief or requirements file. Cross-check it against `../references/api-contract.md` (existing routes/conventions) and `../references/PRODUCT_CONTEXT.md` (product framing — guest-first, backend-is-source-of-truth).
+Read the feature brief or requirements file. Cross-check it against `../references/api-contract.md` (existing routes/conventions) and `../references/sidequest.md` (product framing — guest-first, backend-is-source-of-truth).
 
 **If the file does not exist**: stop, list files in the requirements directory, and ask the user to confirm the correct path. Do not guess.
 **If the brief is ambiguous about auth/roles**: proceed with the most restrictive default (consumer `JwtAuthGuard`, or if admin, the narrowest plausible `@RequirePermissions()` key) and flag the assumption in the delivery report — do not silently guess permissive access. Get this specifically right for anything under `/admin/*` — see `../docs/ARCHITECTURE.md`'s "Two authentication/identity systems" section; using the consumer guard on an admin route is a real security regression, not a style nit.
