@@ -3,6 +3,8 @@ import { ConfigService } from '@nestjs/config';
 import {
   DeleteObjectCommand,
   GetObjectCommand,
+  HeadObjectCommand,
+  NotFound,
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
@@ -79,6 +81,15 @@ export class StorageService {
         accessKeyId: config.getOrThrow<string>('AWS_ACCESS_KEY_ID'),
         secretAccessKey: config.getOrThrow<string>('AWS_SECRET_ACCESS_KEY'),
       },
+      // The SDK v3 default (`WHEN_SUPPORTED`) bakes an x-amz-checksum-crc32
+      // requirement into every PutObjectCommand it signs — including a
+      // presigned URL (getSignedUploadUrl). A raw client PUT (the mobile
+      // app's fetch(), curl, anything not using this SDK) has no way to
+      // produce a matching checksum, so every presigned upload would 400
+      // with "Value for x-amz-checksum-crc32 header is invalid" — reproduced
+      // for real against LocalStack, not a hypothetical. `WHEN_REQUIRED`
+      // only attaches a checksum when a command explicitly opts in.
+      requestChecksumCalculation: 'WHEN_REQUIRED',
     });
   }
 
@@ -168,5 +179,73 @@ export class StorageService {
     return getSignedUrl(this.client, new GetObjectCommand({ Bucket: this.bucket, Key: key }), {
       expiresIn: SIGNED_URL_TTL_SECONDS,
     });
+  }
+
+  /**
+   * Returns a short-lived presigned PUT URL the mobile client uploads the
+   * original image to directly — the "direct-to-S3" half of the media
+   * pipeline (see MediaService.createUploadAuthorization). The backend never
+   * sees the file body for this path, unlike the legacy Multer-mediated
+   * `uploadObject` above (still used by the existing avatar/proof/task-
+   * attachment multipart endpoints, kept for backward compatibility).
+   *
+   * `ContentType` is bound into the signature, so a client can't request a
+   * URL for `image/jpeg` and then upload something else — S3 rejects a PUT
+   * whose actual Content-Type header doesn't match what was signed.
+   */
+  async getSignedUploadUrl(key: string, contentType: string, ttlSeconds: number): Promise<string> {
+    return getSignedUrl(
+      this.client,
+      new PutObjectCommand({ Bucket: this.bucket, Key: key, ContentType: contentType }),
+      { expiresIn: ttlSeconds },
+    );
+  }
+
+  /**
+   * Returns the real, server-reported size (bytes) and content type of an
+   * object already in the bucket, or `null` if it doesn't exist. Used by
+   * MediaService.confirmUpload to verify a presigned-PUT upload actually
+   * landed (and landed within the declared size limit) rather than trusting
+   * whatever the client claimed at authorization time — a client could lie
+   * about `fileSize` in the authorization request, but cannot lie about what
+   * S3 actually received.
+   */
+  async headObject(key: string): Promise<{ size: number; contentType?: string } | null> {
+    try {
+      const result = await this.client.send(
+        new HeadObjectCommand({ Bucket: this.bucket, Key: key }),
+      );
+      return { size: result.ContentLength ?? 0, contentType: result.ContentType };
+    } catch (error) {
+      if (error instanceof NotFound) {
+        return null;
+      }
+      // S3-compatible test doubles (LocalStack) sometimes surface a missing
+      // object as a generic error with name "NotFound" rather than the SDK's
+      // typed NotFound class — treat that the same way rather than letting
+      // it bubble as an unexpected 500.
+      if (error instanceof Error && error.name === 'NotFound') {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  /** Downloads an object's full body into memory. Used by the variant processor to read the original for resizing — original images are size-capped (see MEDIA_UPLOAD_LIMITS) specifically so this is always a bounded, safe amount of memory. */
+  async downloadObject(key: string): Promise<Buffer> {
+    const result = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }));
+    const body = result.Body;
+    if (!body) {
+      throw new Error(`Object ${key} has no body`);
+    }
+    const chunks: Uint8Array[] = [];
+    // AWS SDK v3's Body is a Node.js Readable in this runtime (not a browser
+    // ReadableStream/Blob) — iterate it directly rather than depending on
+    // the SDK's `transformToByteArray()` helper, which isn't available on
+    // every Body implementation LocalStack returns.
+    for await (const chunk of body as AsyncIterable<Uint8Array>) {
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks);
   }
 }
