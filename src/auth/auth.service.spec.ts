@@ -7,6 +7,7 @@ import * as bcrypt from 'bcrypt';
 import { OAuth2Client } from 'google-auth-library';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
+import { MediaService } from '../media/media.service';
 import { ReferralsService } from '../referrals/referrals.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AuthService } from './auth.service';
@@ -57,6 +58,7 @@ function buildUser(overrides: Partial<User> = {}): User {
     googleId: null,
     displayName: 'Ada',
     avatarUrl: null,
+    avatarMediaId: null,
     stripeCustomerId: null,
     isGuest: false,
     totalXp: 0,
@@ -93,6 +95,7 @@ describe('AuthService', () => {
     verifyAsync: jest.Mock;
   };
   let storage: { getSignedDownloadUrl: jest.Mock; deleteObject: jest.Mock };
+  let media: { resolveVariantsForAsset: jest.Mock; deleteMedia: jest.Mock };
   let referrals: { resolveReferrer: jest.Mock; attributeSignup: jest.Mock };
   let notifications: { deregisterPushToken: jest.Mock; deregisterAllPushTokens: jest.Mock };
 
@@ -131,6 +134,10 @@ describe('AuthService', () => {
       getSignedDownloadUrl: jest.fn().mockResolvedValue('https://signed.example/avatar'),
       deleteObject: jest.fn().mockResolvedValue(undefined),
     };
+    media = {
+      resolveVariantsForAsset: jest.fn().mockResolvedValue([]),
+      deleteMedia: jest.fn().mockResolvedValue(undefined),
+    };
     referrals = {
       resolveReferrer: jest.fn().mockResolvedValue('referrer-1'),
       attributeSignup: jest.fn().mockResolvedValue(undefined),
@@ -146,6 +153,7 @@ describe('AuthService', () => {
         { provide: PrismaService, useValue: prisma },
         { provide: JwtService, useValue: jwtService },
         { provide: StorageService, useValue: storage },
+        { provide: MediaService, useValue: media },
         { provide: ReferralsService, useValue: referrals },
         { provide: NotificationsService, useValue: notifications },
         {
@@ -181,7 +189,14 @@ describe('AuthService', () => {
       expect(result).toEqual({
         accessToken: 'access-token',
         refreshToken: 'refresh-token',
-        user: { id: 'user-1', email: null, displayName: 'Ada', isGuest: true, avatarUrl: null },
+        user: {
+          id: 'user-1',
+          email: null,
+          displayName: 'Ada',
+          isGuest: true,
+          avatarUrl: null,
+          avatarVariants: [],
+        },
       });
     });
 
@@ -546,6 +561,7 @@ describe('AuthService', () => {
           displayName: 'Ada',
           isGuest: false,
           avatarUrl: null,
+          avatarVariants: [],
         },
       });
     });
@@ -846,6 +862,7 @@ describe('AuthService', () => {
           displayName: 'Ada',
           isGuest: false,
           avatarUrl: null,
+          avatarVariants: [],
         },
       });
     });
@@ -941,6 +958,7 @@ describe('AuthService', () => {
           displayName: 'Ada',
           isGuest: false,
           avatarUrl: null,
+          avatarVariants: [],
         },
       });
       expect(prisma.user.updateMany).toHaveBeenCalledWith(
@@ -1152,6 +1170,7 @@ describe('AuthService', () => {
         displayName: 'Ada',
         isGuest: false,
         avatarUrl: null,
+        avatarVariants: [],
       });
       expect(profile).not.toHaveProperty('passwordHash');
       expect(profile).not.toHaveProperty('refreshTokenHash');
@@ -1195,6 +1214,7 @@ describe('AuthService', () => {
         displayName: 'New Name',
         isGuest: false,
         avatarUrl: null,
+        avatarVariants: [],
       });
     });
 
@@ -1329,8 +1349,28 @@ describe('AuthService', () => {
           refreshTokenHash: null,
           displayName: 'Deleted User',
           avatarUrl: null,
+          avatarMediaId: null,
         },
       });
+      expect(result).toEqual({ success: true });
+    });
+
+    it('best-effort deletes the media-pipeline avatar asset when one is set', async () => {
+      prisma.user.findUnique.mockResolvedValue(buildUser({ avatarMediaId: 'media-1' }));
+      bcryptCompare.mockResolvedValue(true);
+
+      await service.deleteAccount('user-1', { currentPassword: 'current-password' });
+
+      expect(media.deleteMedia).toHaveBeenCalledWith('user-1', 'media-1');
+    });
+
+    it('swallows a failure deleting the media-pipeline avatar asset and still succeeds', async () => {
+      prisma.user.findUnique.mockResolvedValue(buildUser({ avatarMediaId: 'media-1' }));
+      bcryptCompare.mockResolvedValue(true);
+      media.deleteMedia.mockRejectedValue(new Error('S3 down'));
+
+      const result = await service.deleteAccount('user-1', { currentPassword: 'current-password' });
+
       expect(result).toEqual({ success: true });
     });
 
