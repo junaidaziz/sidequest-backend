@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { AuditLogModule } from '../audit-log/audit-log.module';
 import { StorageModule } from '../storage/storage.module';
+import { MediaModule } from '../media/media.module';
 import { AdminUsersController } from './admin-users.controller';
 import { AdminUsersService } from './admin-users.service';
 
@@ -18,9 +19,12 @@ import { AdminUsersService } from './admin-users.service';
  * AuthModule is imported so admin-initiated deletion reuses
  * `AuthService.anonymizeUserAccount`; AuditLogModule for the audit trail;
  * StorageModule to presign proof/avatar keys in the profile view and export.
+ * MediaModule so the admin detail view can resolve a media-pipeline avatar
+ * (User.avatarMediaId) the same way AuthService.toProfile does, rather than
+ * only ever showing the legacy avatarUrl S3 key.
  */
 @Module({
-  imports: [AuthModule, AuditLogModule, StorageModule],
+  imports: [AuthModule, AuditLogModule, StorageModule, MediaModule],
   controllers: [AdminUsersController],
   providers: [AdminUsersService],
   // AdminUsersService is exported so the Phase 10 moderation module can REUSE its
