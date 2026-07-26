@@ -5,6 +5,7 @@ import { AuditLogService } from '../audit-log/audit-log.service';
 import { AuditResult } from '../audit-log/types/audit';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
+import { MediaService } from '../media/media.service';
 import { computeLevel } from '../home/level.util';
 import { RestrictableFeature, UserAccountStatus } from './admin-users.constants';
 import {
@@ -57,6 +58,7 @@ export class AdminUsersService {
     private readonly audit: AuditLogService,
     private readonly storage: StorageService,
     private readonly authService: AuthService,
+    private readonly media: MediaService,
   ) {}
 
   /** Paginated, filtered list. Only filters on columns that exist on `User`. */
@@ -283,7 +285,7 @@ export class AdminUsersService {
       throw new NotFoundException('User not found');
     }
 
-    await this.authService.anonymizeUserAccount(userId, user.avatarUrl);
+    await this.authService.anonymizeUserAccount(userId, user.avatarUrl, user.avatarMediaId);
     await this.recordAudit('users.delete', userId, ctx, {
       previous: { status: this.deriveStatus(user) },
       next: { status: UserAccountStatus.Deleted },
@@ -382,6 +384,24 @@ export class AdminUsersService {
     return UserAccountStatus.Active;
   }
 
+  /**
+   * Resolves a user's avatar the same way `AuthService.toProfile` does:
+   * prefer the media pipeline (`avatarMediaId` -> largest ready variant) and
+   * fall back to the legacy S3-key-to-presigned-URL path. Without this, the
+   * admin detail view showed `avatarUrl: null` for any user who set their
+   * avatar through the media pipeline instead of the legacy multipart
+   * upload — found by independent review, not a hypothetical.
+   */
+  private async resolveAvatarUrl(
+    user: Pick<User, 'avatarUrl' | 'avatarMediaId'>,
+  ): Promise<string | null> {
+    if (user.avatarMediaId) {
+      const variants = await this.media.resolveVariantsForAsset(user.avatarMediaId);
+      return variants.length > 0 ? variants[variants.length - 1].url : null;
+    }
+    return user.avatarUrl ? this.storage.getSignedDownloadUrl(user.avatarUrl) : null;
+  }
+
   private toListItem(user: User): AdminUserListItemDto {
     return {
       id: user.id,
@@ -478,7 +498,7 @@ export class AdminUsersService {
       displayName: user.displayName,
       isGuest: user.isGuest,
       status: this.deriveStatus(user),
-      avatarUrl: user.avatarUrl ? await this.storage.getSignedDownloadUrl(user.avatarUrl) : null,
+      avatarUrl: await this.resolveAvatarUrl(user),
       totalXp: user.totalXp,
       level: computeLevel(user.totalXp).level,
       currentStreak: user.currentStreak,
