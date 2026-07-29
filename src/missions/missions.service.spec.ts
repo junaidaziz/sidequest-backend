@@ -266,6 +266,59 @@ describe('MissionsService', () => {
     });
   });
 
+  describe('getById', () => {
+    it('returns the mission in the mobile short-field shape for an active mission', async () => {
+      findUnique.mockResolvedValue(
+        makeMission({
+          id: MISSION_ID,
+          title: 'Find the Oldest Thing',
+          category: MissionCategory.discover,
+          estimatedMinutes: 20,
+          xpReward: 40,
+          difficulty: MissionDifficulty.Medium,
+          difficultyDots: 2,
+        }),
+      );
+
+      const res = await service.getById(MISSION_ID);
+
+      expect(findUnique).toHaveBeenCalledWith({ where: { id: MISSION_ID } });
+      expect(res).toEqual({
+        id: MISSION_ID,
+        category: 'discover',
+        title: 'Find the Oldest Thing',
+        desc: 'Short teaser.',
+        full: 'The full brief.',
+        proof: 'A photo.',
+        time: '20 min',
+        xp: '+40 XP',
+        diff: 'Medium',
+        dots: 2,
+      });
+    });
+
+    it('does not depend on the saved list (no savedMission read)', async () => {
+      findUnique.mockResolvedValue(makeMission({ id: MISSION_ID }));
+      await service.getById(MISSION_ID);
+      expect(findMany).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when the mission does not exist', async () => {
+      findUnique.mockResolvedValue(null);
+      await expect(service.getById(MISSION_ID)).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('throws NotFoundException when the mission is inactive', async () => {
+      findUnique.mockResolvedValue(makeMission({ id: MISSION_ID, isActive: false }));
+      await expect(service.getById(MISSION_ID)).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('throws NotFoundException when the mission is soft-deleted', async () => {
+      findUnique.mockResolvedValue(makeMission({ id: MISSION_ID, deletedAt: new Date() }));
+      await expect(service.getById(MISSION_ID)).rejects.toBeInstanceOf(NotFoundException);
+    });
+  });
+
   describe('saveMission', () => {
     it('upserts a save for an active mission and returns { saved: true }', async () => {
       findUnique.mockResolvedValue({ id: MISSION_ID, isActive: true, deletedAt: null });

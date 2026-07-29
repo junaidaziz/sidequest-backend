@@ -231,4 +231,67 @@ describe('Proof submission (e2e)', () => {
         .expect(404);
     });
   });
+
+  describe('timezone-aware streak (P0 gap C)', () => {
+    /** Sets the user's IANA timezone through the real client write path. */
+    async function setTimezone(token: string, timezone: string): Promise<void> {
+      await request(app.getHttpServer())
+        .patch('/auth/me')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ timezone })
+        .expect(200);
+    }
+
+    it('threads the PATCH /auth/me timezone through streak math so the stored completion day is the LOCAL civil day, not the UTC day', async () => {
+      // Two zones 26 hours apart (UTC+14 vs UTC-12): at ANY instant their local
+      // calendar dates differ, so a correct local-day implementation stores two
+      // different lastCompletionDate values here — while a pure-UTC implementation
+      // (the bug this fix closes) would store the SAME UTC-midnight for both. The
+      // 26h gap is what makes the assertion deterministic regardless of wall-clock.
+      const ahead = await createGuest();
+      const behind = await createGuest();
+      await setTimezone(ahead.token, 'Pacific/Kiritimati'); // UTC+14
+      await setTimezone(behind.token, 'Etc/GMT+12'); // UTC-12
+
+      // GET /auth/me echoes the newly-set timezone back to the client.
+      const profile = await request(app.getHttpServer())
+        .get('/auth/me')
+        .set('Authorization', `Bearer ${ahead.token}`)
+        .expect(200);
+      expect(profile.body.timezone).toBe('Pacific/Kiritimati');
+
+      for (const who of [ahead, behind]) {
+        await request(app.getHttpServer())
+          .post(`/missions/${missionId}/proof`)
+          .set('Authorization', `Bearer ${who.token}`)
+          .field('caption', 'local-day streak proof')
+          .expect(201);
+      }
+
+      const aheadUser = await prisma.user.findUnique({ where: { id: ahead.userId } });
+      const behindUser = await prisma.user.findUnique({ where: { id: behind.userId } });
+
+      expect(aheadUser?.lastCompletionDate).not.toBeNull();
+      expect(behindUser?.lastCompletionDate).not.toBeNull();
+      // The crux: pure-UTC math would make these identical; local-day math cannot.
+      expect(aheadUser?.lastCompletionDate?.getTime()).not.toBe(
+        behindUser?.lastCompletionDate?.getTime(),
+      );
+      // Each stored value is a civil-day boundary (UTC-midnight of the local date).
+      for (const d of [aheadUser?.lastCompletionDate, behindUser?.lastCompletionDate]) {
+        expect(d?.getUTCHours()).toBe(0);
+        expect(d?.getUTCMinutes()).toBe(0);
+        expect(d?.getUTCSeconds()).toBe(0);
+      }
+      // At least one local date must differ from the plain UTC calendar date,
+      // proving the timezone actually moved the boundary (not a coincidental match).
+      const now = new Date();
+      const utcMidnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+      const stored = [
+        aheadUser?.lastCompletionDate?.getTime(),
+        behindUser?.lastCompletionDate?.getTime(),
+      ];
+      expect(stored.some((t) => t !== utcMidnight)).toBe(true);
+    });
+  });
 });

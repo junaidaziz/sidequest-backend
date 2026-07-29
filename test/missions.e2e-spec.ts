@@ -223,6 +223,68 @@ describe('Missions (e2e)', () => {
     });
   });
 
+  describe('GET /missions/:missionId', () => {
+    // One shared guest for this block (not per-test) — none of these cases care
+    // about a distinct user identity, and the file's guest-creation throttle
+    // (10/60s, see backend/CLAUDE.md) is shared across every describe block here.
+    let sharedToken: string;
+
+    beforeAll(async () => {
+      const { token } = await createGuest();
+      sharedToken = token;
+    });
+
+    it('is public (no access token required) — backs the unauthenticated challenge/deep-link flow', async () => {
+      const res = await request(app.getHttpServer()).get(`/missions/${missionAId}`).expect(200);
+      expect(res.body).toMatchObject({ id: missionAId, title: titleA });
+    });
+
+    it('returns 400 for a non-UUID mission id', async () => {
+      await request(app.getHttpServer())
+        .get('/missions/not-a-uuid')
+        .set('Authorization', `Bearer ${sharedToken}`)
+        .expect(400);
+    });
+
+    it('returns 404 for a valid but non-existent mission id', async () => {
+      await request(app.getHttpServer())
+        .get('/missions/00000000-0000-0000-0000-000000000000')
+        .set('Authorization', `Bearer ${sharedToken}`)
+        .expect(404);
+    });
+
+    it('returns the mission in the mobile short-field shape, independent of the saved list', async () => {
+      // Not saved by this user — the detail must resolve regardless.
+      const res = await request(app.getHttpServer())
+        .get(`/missions/${missionAId}`)
+        .set('Authorization', `Bearer ${sharedToken}`)
+        .expect(200);
+
+      expect(res.body).toEqual({
+        id: missionAId,
+        category: 'discover',
+        title: titleA,
+        desc: 'Short teaser.',
+        full: 'The full brief.',
+        proof: 'A photo.',
+        time: '15 min',
+        xp: '+25 XP',
+        diff: 'Easy',
+        dots: 1,
+      });
+    });
+
+    it('does not let the dynamic :missionId route shadow GET /missions/saved', async () => {
+      // '/missions/saved' must still hit the saved-list handler (200 + page shape),
+      // not be parsed as a mission id (which would 400 on the UUID pipe).
+      const res = await request(app.getHttpServer())
+        .get('/missions/saved')
+        .set('Authorization', `Bearer ${sharedToken}`)
+        .expect(200);
+      expect(res.body).toMatchObject({ items: expect.any(Array), total: expect.any(Number) });
+    });
+  });
+
   describe('GET /missions/saved', () => {
     it('returns 401 without an access token', async () => {
       await request(app.getHttpServer()).get('/missions/saved').expect(401);

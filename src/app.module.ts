@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ThrottlerStorageRedisService } from '@nest-lab/throttler-storage-redis';
-import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { BullModule } from '@nestjs/bullmq';
 import { APP_GUARD } from '@nestjs/core';
 import { AppController } from './app.controller';
@@ -29,10 +29,13 @@ import { RbacModule } from './rbac/rbac.module';
 import { CmsModule } from './cms/cms.module';
 import { AppConfigModule } from './app-config/app-config.module';
 import { AdminChallengesModule } from './admin-challenges/admin-challenges.module';
+import { AdminMissionTagsModule } from './admin-mission-tags/admin-mission-tags.module';
 import { ModerationModule } from './moderation/moderation.module';
 import { NotificationCampaignsModule } from './notification-campaigns/notification-campaigns.module';
 import { AnalyticsModule } from './analytics/analytics.module';
+import { ContactModule } from './contact/contact.module';
 import { MediaModule } from './media/media.module';
+import { TrustedIpThrottlerGuard } from './common/guards/trusted-ip-throttler.guard';
 
 /**
  * `Number(...)` of a non-numeric env value silently produces NaN, which would
@@ -121,6 +124,10 @@ function bullConnectionFromRedisUrl(redisUrl: string): {
     AppConfigModule,
     // Phase 9 — admin challenge (Mission) authoring: CRUD + publish/archive/etc.
     AdminChallengesModule,
+    // Closed-beta admin tooling — admin-managed mission crew/setting tag vocabulary.
+    AdminMissionTagsModule,
+    // Closed-beta admin tooling — public contact form intake + admin triage.
+    ContactModule,
     // Phase 10 — moderation queue + Report/ModerationAction/Appeal workflow, and
     // the RBAC-gated proof-review route. The legacy AdminGuard/x-admin-key
     // completion-verification route was removed in this phase's cutover.
@@ -139,8 +146,11 @@ function bullConnectionFromRedisUrl(redisUrl: string): {
   providers: [
     AppService,
     {
+      // TrustedIpThrottlerGuard is a drop-in ThrottlerGuard subclass: it behaves
+      // identically to the stock guard except it honours a secret-gated forwarded
+      // client IP from the trusted `web` BFF (see the guard's own doc comment).
       provide: APP_GUARD,
-      useClass: ThrottlerGuard,
+      useClass: TrustedIpThrottlerGuard,
     },
   ],
 })

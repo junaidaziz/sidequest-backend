@@ -29,6 +29,15 @@ export interface CampaignActionContext {
  * (`NotificationPreference.marketingEnabled`), never a targeting criterion.
  */
 export interface CampaignTargetFilter {
+  /**
+   * Target one or more specific users by id — the single-user (or hand-picked
+   * small set) push-targeting dimension. When present, it is AND-combined with
+   * every other dimension and with the always-on soft-delete/suspension
+   * exclusions, so a 1-element array produces a 1-recipient campaign (still
+   * subject to those exclusions and the per-recipient marketing opt-out gate at
+   * send time). An empty array intentionally matches no one.
+   */
+  userIds?: string[];
   /** Registered on/after this instant (`User.createdAt >=`). ISO-8601. */
   registeredAfter?: string;
   /** Registered on/before this instant (`User.createdAt <=`). ISO-8601. */
@@ -80,6 +89,13 @@ export function buildTargetWhere(
   const where: Prisma.UserWhereInput = { deletedAt: null, suspendedAt: null };
   if (!filter) {
     return where;
+  }
+
+  if (filter.userIds !== undefined) {
+    // AND-combined with the always-on exclusions above (and any other dimension
+    // below): `id IN (...)`. An empty array yields `IN ()`, which matches no
+    // rows — the intended semantics for "target exactly these users, none given".
+    where.id = { in: filter.userIds };
   }
 
   if (filter.registeredAfter || filter.registeredBefore) {

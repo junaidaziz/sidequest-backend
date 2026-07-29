@@ -6,6 +6,7 @@ import { StorageModule } from '../storage/storage.module';
 import { MediaModule } from '../media/media.module';
 import { ReferralsModule } from '../referrals/referrals.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { EmailModule } from '../email/email.module';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
@@ -28,6 +29,9 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     // AuthModule -> NotificationsModule; NotificationsModule does not import
     // AuthModule, so there is no dependency cycle.
     NotificationsModule,
+    // Consumer password-reset emails (forgot/reset-password). EmailModule exports
+    // EmailService; RedisService (token store) is already global via RedisModule.
+    EmailModule,
     JwtModule.registerAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({

@@ -32,6 +32,18 @@ export const AUTHORABLE_SETTING_VALUES = SETTING_VALUES.filter(
 ) as Exclude<(typeof SETTING_VALUES)[number], 'Anywhere'>[];
 
 /**
+ * KNOWN GAP (2026-07-28): `CREW_VALUES`/`AUTHORABLE_SETTING_VALUES` above are
+ * still the source of truth for mission-authoring validation. The admin-managed
+ * `MissionTag` table (`src/admin-mission-tags/`) was introduced the same day as
+ * an editable vocabulary for the web admin panel, but this DTO was NOT wired to
+ * validate against it — the two currently just happen to hold matching values
+ * because `MissionTag` was seeded from these same constants. Deactivating or
+ * renaming a tag via `/admin/mission-tags` does NOT affect what this endpoint
+ * accepts. Wiring that coupling is a real follow-up, not done here to avoid
+ * risking a regression in the existing admin-challenges e2e fixtures.
+ */
+
+/**
  * Body for `POST /admin/missions`. Covers the mission's content + admin-authoring
  * fields. Deliberately does NOT accept `status`, `isActive`, `featured`,
  * `approvedAt`/`approvedByAdminId`, or `createdByAdminId`: those are lifecycle

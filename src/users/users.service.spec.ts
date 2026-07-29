@@ -16,6 +16,7 @@ const PROFILE: UserProfileDto = {
   email: 'ada@example.com',
   displayName: 'Ada',
   isGuest: false,
+  timezone: 'UTC',
   avatarUrl: 'https://signed.example/avatar',
   avatarVariants: [],
 };

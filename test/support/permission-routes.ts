@@ -37,9 +37,13 @@ import { CmsTestimonialController } from '../../src/cms/controllers/cms-testimon
 import { AppConfigController } from '../../src/app-config/app-config.controller';
 import { AppConfigPublicController } from '../../src/app-config/app-config-public.controller';
 import { AdminChallengesController } from '../../src/admin-challenges/admin-challenges.controller';
+import { AdminMissionTagsController } from '../../src/admin-mission-tags/admin-mission-tags.controller';
 import { ModerationController } from '../../src/moderation/moderation.controller';
+import { ReportsController } from '../../src/moderation/reports.controller';
 import { NotificationCampaignsController } from '../../src/notification-campaigns/notification-campaigns.controller';
 import { AnalyticsController } from '../../src/analytics/analytics.controller';
+import { ContactController } from '../../src/contact/contact.controller';
+import { AdminContactController } from '../../src/contact/admin-contact.controller';
 
 /** The full set of controllers the matrix walks. Cross-checked at boot. */
 export const ALL_CONTROLLERS: Type<unknown>[] = [
@@ -70,9 +74,13 @@ export const ALL_CONTROLLERS: Type<unknown>[] = [
   AppConfigController,
   AppConfigPublicController,
   AdminChallengesController,
+  AdminMissionTagsController,
   ModerationController,
+  ReportsController,
   NotificationCampaignsController,
   AnalyticsController,
+  ContactController,
+  AdminContactController,
 ];
 
 /** supertest-callable lowercase HTTP verb. */

@@ -22,6 +22,7 @@ function buildUser(overrides: Partial<User> = {}): User {
     currentStreak: 0,
     longestStreak: 0,
     lastCompletionDate: null,
+    timezone: 'UTC',
     createdAt: new Date(),
     updatedAt: new Date(),
     deletedAt: null,

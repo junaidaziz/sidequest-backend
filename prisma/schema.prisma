@@ -46,6 +46,11 @@ model User {
   /// UTC calendar date (midnight-normalized) of the last completion, used to
   /// compute whether a new completion extends, resets, or no-ops the streak.
   lastCompletionDate DateTime?
+  /// IANA timezone name (e.g. "America/New_York") used to compute streaks on the
+  /// user's LOCAL calendar day instead of the UTC day. Nullable + defaults to
+  /// "UTC" so every existing row keeps the previous UTC-day behaviour until the
+  /// client reports a real zone; `computeStreak` falls back to UTC when unset.
+  timezone     String?   @default("UTC")
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
   deletedAt    DateTime?
@@ -110,6 +115,11 @@ model User {
   reportsMade              Report[]           @relation("ReportReporter")
   moderationActionsAgainst ModerationAction[] @relation("ModerationTargetUser")
   appeals                  Appeal[]           @relation("AppealAppellant")
+
+  /// Reporter-local hides (user-facing reporting, P0 gap #6). Each row hides a
+  /// single target from THIS user's own view only; global hiding lives in
+  /// GlobalContentHide. Cascade-deleted with the user.
+  hiddenContent            HiddenContent[]    @relation("UserHiddenContent")
 
   /// Admin who suspended this account (Phase 8). Nullable FK, SetNull on the
   /// admin's deletion so an ex-admin's removal never blocks reading which account
@@ -1261,10 +1271,64 @@ model Report {
   deletedAt DateTime?
 
   actions ModerationAction[]
+  /// Reporter-local hides created off the back of this report (usually exactly
+  /// one — the reporter's own hide).
+  hiddenEntries HiddenContent[]
 
+  /// DB-level guarantee of one report per (reporter, target) so two concurrent
+  /// identical POST /reports from the same user can't both pass an in-transaction
+  /// existence check and both insert — the reportId a repeat report returns stays
+  /// deterministic and rows never accumulate. `reporterUserId` is nullable for
+  /// system/anonymized reports; Postgres treats NULLs as distinct, so those rows
+  /// are intentionally exempt from this uniqueness and can coexist for one target.
+  @@unique([reporterUserId, targetType, targetId])
   @@index([targetType, targetId])
   @@index([status])
   @@index([reporterUserId])
+}
+
+/// Reporter-local hide (user-facing reporting, P0 gap #6). When a regular user
+/// reports a target, the target is hidden from THAT reporter's own view only —
+/// never globally. Global hiding requires an admin `ModerationAction`
+/// (HideContent/RemoveContent) or the automatic escalation once a *second
+/// distinct* user reports the same target (see `GlobalContentHide`). One row per
+/// (user, target); re-reporting the same target is idempotent via the unique.
+model HiddenContent {
+  id         String               @id @default(uuid())
+  userId     String
+  user       User                 @relation("UserHiddenContent", fields: [userId], references: [id], onDelete: Cascade)
+  targetType ModerationTargetType
+  targetId   String
+  /// The report that caused this hide, if any. Nullable + SetNull so a future
+  /// direct block/mute path (no report) can reuse this table, and so a report's
+  /// soft-delete cleanup never has to cascade-delete the reporter's hide.
+  reportId   String?
+  report     Report?              @relation(fields: [reportId], references: [id], onDelete: SetNull)
+  createdAt  DateTime             @default(now())
+  updatedAt  DateTime             @updatedAt
+
+  @@unique([userId, targetType, targetId])
+  @@index([userId, targetType])
+  @@index([targetType, targetId])
+}
+
+/// A globally hidden target — hidden for EVERYONE, not just one reporter. Written
+/// automatically once a second distinct user reports the same target (the
+/// escalation in `ReportsService`). Represented as its own lightweight flag table
+/// rather than a `ModerationAction` because the auto-hide is system-generated and
+/// has no acting `AdminUser` (ModerationAction.adminUserId is a required FK to an
+/// AdminUser, which a system escalation has none of). Admin-driven global hides
+/// still go through `ModerationAction` as before. Keyed uniquely by target so the
+/// escalation upsert is idempotent under concurrent reports.
+model GlobalContentHide {
+  id         String               @id @default(uuid())
+  targetType ModerationTargetType
+  targetId   String
+  reason     String
+  createdAt  DateTime             @default(now())
+  updatedAt  DateTime             @updatedAt
+
+  @@unique([targetType, targetId])
 }
 
 /// A moderation decision, optionally linked to the Report that prompted it.
@@ -1447,4 +1511,72 @@ model MediaVariant {
 
   @@unique([mediaAssetId, name])
   @@index([mediaAssetId])
+}
+
+// ---------------------------------------------------------------------------
+// Admin-managed mission tag vocabulary (closed-beta admin tooling). Replaces the
+// previously hardcoded crew/setting tag string constants with a DB-backed,
+// admin-editable vocabulary. `Mission.crewTags`/`settingTags` remain String[]
+// columns (no FK) matched by the rules-based generator; this table is the
+// authoritative catalog of the *allowed values* those arrays should draw from.
+// Tags are deactivated (isActive = false), never hard-deleted, so a value still
+// referenced by existing missions keeps rendering while being retired from the
+// authoring picker.
+// ---------------------------------------------------------------------------
+
+/// Which mission filter dimension a MissionTag belongs to: the crew vocabulary
+/// (Solo/Partner/Friends/...) or the setting vocabulary (Outdoors/Indoors/...).
+enum MissionTagType {
+  Crew
+  Setting
+}
+
+model MissionTag {
+  id String @id @default(uuid())
+  type MissionTagType
+  /// The canonical value stored in Mission.crewTags/settingTags (e.g. "Solo").
+  value String
+  /// Human-facing label for the admin authoring UI (often the same as `value`).
+  label String
+  /// Retired tags are deactivated rather than deleted (they may still be
+  /// referenced by existing missions); the authoring picker shows active only.
+  isActive Boolean @default(true)
+  /// Display order within a type for the authoring picker.
+  sortOrder Int @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// One row per (type, value) — the same literal can exist as both a Crew and a
+  /// Setting tag but never twice within one dimension.
+  @@unique([type, value])
+  @@index([type])
+  @@index([isActive])
+}
+
+// ---------------------------------------------------------------------------
+// Public marketing-site contact form submissions (closed-beta admin tooling).
+// Persisted from the unauthenticated POST /contact endpoint; triaged by admins
+// via the RBAC-gated /admin/contact-submissions surface. A notification email is
+// sent best-effort on submission (never blocks the write).
+// ---------------------------------------------------------------------------
+
+/// Triage lifecycle of a contact submission.
+enum ContactSubmissionStatus {
+  New
+  Read
+  Resolved
+}
+
+model ContactSubmission {
+  id String @id @default(uuid())
+  name String
+  email String
+  topic String
+  message String
+  status ContactSubmissionStatus @default(New)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([createdAt])
 }

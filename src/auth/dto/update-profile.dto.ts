@@ -1,21 +1,37 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { IsString, MaxLength, MinLength } from 'class-validator';
+import { ApiPropertyOptional } from '@nestjs/swagger';
+import { IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { IsIanaTimeZone } from '../validators/is-iana-timezone.validator';
 
 /**
- * Body for `PATCH /auth/me`. `displayName` is required here (unlike signup, where
- * it is optional) — this endpoint exists specifically to set it, so an empty or
- * missing value is a 400 rather than a silent no-op. Bounds mirror SignupDto's
- * `@MaxLength(50)`, with an added `@MinLength(1)` to reject the empty string.
+ * Body for `PATCH /auth/me`. Every field is optional so a client can update just
+ * one attribute (e.g. set `timezone` on first launch without touching the display
+ * name); the global `ValidationPipe` still rejects any field outside this shape.
+ * `displayName`, when present, keeps SignupDto's `@MaxLength(50)` bound plus a
+ * `@MinLength(1)` so it can be *set* but never blanked to the empty string.
+ * `timezone` is validated as a real IANA zone name (see `IsIanaTimeZone`) so the
+ * per-user local-day streak logic (`ProofService`/`streak.util`) only ever
+ * receives a zone the runtime's `Intl` database recognizes.
  */
 export class UpdateProfileDto {
-  @ApiProperty({
+  @ApiPropertyOptional({
     example: 'Ada',
     minLength: 1,
     maxLength: 50,
     description: 'New public display name (1-50 characters).',
   })
+  @IsOptional()
   @IsString()
   @MinLength(1)
   @MaxLength(50)
-  displayName!: string;
+  displayName?: string;
+
+  @ApiPropertyOptional({
+    example: 'America/New_York',
+    description:
+      'IANA timezone name used to compute the completion streak on the user’s local ' +
+      'calendar day instead of the UTC day.',
+  })
+  @IsOptional()
+  @IsIanaTimeZone()
+  timezone?: string;
 }

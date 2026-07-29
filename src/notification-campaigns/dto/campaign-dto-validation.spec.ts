@@ -104,5 +104,24 @@ describe('Campaign DTO validation', () => {
         ),
       ).toHaveLength(0);
     });
+
+    it('accepts a userIds array of UUIDs (single-user targeting)', () => {
+      const dto = plainToInstance(CampaignTargetFilterDto, {
+        userIds: ['11111111-1111-4111-8111-111111111111'],
+      });
+      expect(validateSync(dto)).toHaveLength(0);
+    });
+
+    it('rejects a userIds entry that is not a UUID', () => {
+      const dto = plainToInstance(CampaignTargetFilterDto, { userIds: ['not-a-uuid'] });
+      expect(validateSync(dto).length).toBeGreaterThan(0);
+    });
+
+    it('rejects a userIds value that is not an array', () => {
+      const dto = plainToInstance(CampaignTargetFilterDto, {
+        userIds: '11111111-1111-4111-8111-111111111111',
+      });
+      expect(validateSync(dto).length).toBeGreaterThan(0);
+    });
   });
 });

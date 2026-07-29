@@ -144,8 +144,9 @@ export class ProofService {
           currentStreak: number;
           longestStreak: number;
           lastCompletionDate: Date | null;
+          timezone: string | null;
         }[]
-      >`SELECT id, "isGuest", "currentStreak", "longestStreak", "lastCompletionDate"
+      >`SELECT id, "isGuest", "currentStreak", "longestStreak", "lastCompletionDate", "timezone"
         FROM users WHERE id = ${userId} FOR UPDATE`;
       if (!lockedUser) {
         throw new NotFoundException('User not found');
@@ -162,6 +163,8 @@ export class ProofService {
         lastCompletionDate: lockedUser.lastCompletionDate,
         currentStreak: lockedUser.currentStreak,
         longestStreak: lockedUser.longestStreak,
+        // Compute the streak on the user's LOCAL calendar day; null falls back to UTC.
+        timeZone: lockedUser.timezone,
       });
 
       const createdCompletion = await tx.completion.create({

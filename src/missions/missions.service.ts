@@ -3,7 +3,7 @@ import { Mission } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { BudgetValue, GenerateMissionsDto, TimeValue } from './dto/generate-missions.dto';
 import { MissionPoolService } from './mission-pool.service';
-import { GenerateMissionsResponseDto } from './dto/mission-response.dto';
+import { GenerateMissionsResponseDto, MissionResponseDto } from './dto/mission-response.dto';
 import { SaveMissionResponseDto } from './dto/save-mission-response.dto';
 import { ListSavedMissionsQueryDto } from './dto/list-saved-missions-query.dto';
 import { PaginatedSavedMissionsDto } from './dto/saved-mission-response.dto';
@@ -67,6 +67,21 @@ export class MissionsService {
     );
 
     return { missions: selected.map((mission) => toMissionResponse(mission)) };
+  }
+
+  /**
+   * Fetches a single active mission by id in the same shape `generate` returns
+   * its items in. Independent of the caller's saved list — a mission the user
+   * never saved (or already unsaved) resolves identically. 404s on a missing,
+   * inactive, or soft-deleted mission, matching `saveMission`/`submitProof`, so
+   * a client can never open a detail view for a quest it can no longer act on.
+   */
+  async getById(missionId: string): Promise<MissionResponseDto> {
+    const mission = await this.prisma.mission.findUnique({ where: { id: missionId } });
+    if (!mission || !mission.isActive || mission.deletedAt) {
+      throw new NotFoundException('Mission not found or inactive');
+    }
+    return toMissionResponse(mission);
   }
 
   /**

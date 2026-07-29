@@ -17,7 +17,7 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AuthUser } from '../auth/types/jwt-payload.interface';
 import { GenerateMissionsDto } from './dto/generate-missions.dto';
-import { GenerateMissionsResponseDto } from './dto/mission-response.dto';
+import { GenerateMissionsResponseDto, MissionResponseDto } from './dto/mission-response.dto';
 import { SaveMissionResponseDto } from './dto/save-mission-response.dto';
 import { ListSavedMissionsQueryDto } from './dto/list-saved-missions-query.dto';
 import { PaginatedSavedMissionsDto } from './dto/saved-mission-response.dto';
@@ -70,6 +70,28 @@ export class MissionsController {
     @Query() query: ListSavedMissionsQueryDto,
   ): Promise<PaginatedSavedMissionsDto> {
     return this.missionsService.listSaved(user.userId, query);
+  }
+
+  /**
+   * Fetch a single mission by id, in the same shape as items from `generate`.
+   * Works whether or not the mission is in the caller's saved list. Declared
+   * AFTER `GET /missions/saved` so the static `saved` route is matched first and
+   * this dynamic `:missionId` route never shadows it.
+   *
+   * Public by design, matching `generate`'s auth posture: this backs the
+   * unauthenticated challenge/deep-link flow where a mission detail is opened
+   * before any guest or account session exists — so no JwtAuthGuard. It exposes
+   * only curated, non-personal mission content (identical to what `generate`
+   * already returns unauthenticated), so nothing user-specific leaks.
+   */
+  @Get(':missionId')
+  @ApiParam({ name: 'missionId', format: 'uuid' })
+  @ApiOperation({ summary: 'Fetch a single mission by id' })
+  @ApiResponse({ status: 200, type: MissionResponseDto })
+  @ApiResponse({ status: 400, description: 'missionId is not a valid UUID' })
+  @ApiResponse({ status: 404, description: 'Mission not found or inactive' })
+  getMission(@Param('missionId', ParseUUIDPipe) missionId: string): Promise<MissionResponseDto> {
+    return this.missionsService.getById(missionId);
   }
 
   /**

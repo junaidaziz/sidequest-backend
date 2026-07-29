@@ -17,9 +17,11 @@ describe('AuthController', () => {
     refresh: jest.Mock;
     logout: jest.Mock;
     getProfile: jest.Mock;
-    updateDisplayName: jest.Mock;
+    updateProfile: jest.Mock;
     changePassword: jest.Mock;
     deleteAccount: jest.Mock;
+    forgotPassword: jest.Mock;
+    resetPassword: jest.Mock;
   };
 
   beforeEach(async () => {
@@ -31,9 +33,11 @@ describe('AuthController', () => {
       refresh: jest.fn().mockResolvedValue(TOKENS),
       logout: jest.fn().mockResolvedValue({ success: true }),
       getProfile: jest.fn(),
-      updateDisplayName: jest.fn(),
+      updateProfile: jest.fn(),
       changePassword: jest.fn().mockResolvedValue({ success: true }),
       deleteAccount: jest.fn().mockResolvedValue({ success: true }),
+      forgotPassword: jest.fn().mockResolvedValue(undefined),
+      resetPassword: jest.fn().mockResolvedValue({ success: true }),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -100,6 +104,36 @@ describe('AuthController', () => {
     expect(googleTtl).toBe(60_000);
   });
 
+  it('POST /auth/forgot-password always returns { success: true } and delegates', async () => {
+    const result = await controller.forgotPassword({ email: 'ada@example.com' });
+
+    expect(service.forgotPassword).toHaveBeenCalledWith({ email: 'ada@example.com' });
+    // Always a generic success — even the service resolving undefined must not
+    // change the always-200 no-enumeration contract.
+    expect(result).toEqual({ success: true });
+  });
+
+  it('POST /auth/reset-password forwards the token + new password DTO', async () => {
+    const dto = { token: 'user-1.raw', newPassword: 'n3w-password' };
+
+    const result = await controller.resetPassword(dto);
+
+    expect(service.resetPassword).toHaveBeenCalledWith(dto);
+    expect(result).toEqual({ success: true });
+  });
+
+  it('POST /auth/forgot-password + /auth/reset-password are in the sensitive throttle tier', () => {
+    const limitKey = 'THROTTLER:LIMITdefault';
+    const ttlKey = 'THROTTLER:TTLdefault';
+    for (const handler of [
+      AuthController.prototype.forgotPassword,
+      AuthController.prototype.resetPassword,
+    ]) {
+      expect(Reflect.getMetadata(limitKey, handler)).toBe(5);
+      expect(Reflect.getMetadata(ttlKey, handler)).toBe(60_000);
+    }
+  });
+
   it('POST /auth/login forwards the credentials DTO', async () => {
     const dto = { email: 'ada@example.com', password: 'password123' };
 
@@ -141,6 +175,7 @@ describe('AuthController', () => {
       email: 'ada@example.com',
       displayName: 'Ada',
       isGuest: false,
+      timezone: 'UTC',
       avatarUrl: null,
       avatarVariants: [],
     };
@@ -153,21 +188,23 @@ describe('AuthController', () => {
     expect(result).toEqual(profile);
   });
 
-  it('PATCH /auth/me forwards the new display name and returns the updated profile', async () => {
+  it('PATCH /auth/me forwards the update DTO and returns the updated profile', async () => {
     const profile: UserProfileDto = {
       id: 'user-1',
       email: 'ada@example.com',
       displayName: 'New Name',
       isGuest: false,
+      timezone: 'America/New_York',
       avatarUrl: null,
       avatarVariants: [],
     };
-    service.updateDisplayName.mockResolvedValue(profile);
+    service.updateProfile.mockResolvedValue(profile);
     const user: AuthUser = { userId: 'user-1', email: 'ada@example.com', isGuest: false };
+    const dto = { displayName: 'New Name', timezone: 'America/New_York' };
 
-    const result = await controller.updateMe(user, { displayName: 'New Name' });
+    const result = await controller.updateMe(user, dto);
 
-    expect(service.updateDisplayName).toHaveBeenCalledWith('user-1', 'New Name');
+    expect(service.updateProfile).toHaveBeenCalledWith('user-1', dto);
     expect(result).toEqual(profile);
   });
 

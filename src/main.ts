@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { Logger, ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import type { Express } from 'express';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
@@ -16,6 +17,33 @@ async function bootstrap() {
   // future deployment that needs one without the other (e.g. Swagger on
   // staging, CORS still locked down) only needs an env change, not code.
   const isDevOrTest = ['development', 'test'].includes(process.env.NODE_ENV ?? '');
+
+  // Trust exactly ONE proxy hop — Railway's own edge, which fronts every request
+  // into this container. With this set, Express resolves `req.ip` to the first
+  // entry of the `X-Forwarded-For` header Railway's edge appends, instead of the
+  // edge's own hop address. `1` (not `true`, not a larger depth) is deliberate:
+  // trusting an arbitrary depth would let a direct attacker prepend a spoofed
+  // `X-Forwarded-For` entry and control `req.ip`, defeating the per-IP throttle.
+  // We trust exactly the one hop we actually operate.
+  //
+  // This alone fixes `req.ip` for traffic that arrives DIRECTLY at the edge
+  // (mobile app, direct API calls, an admin browser hitting the backend through
+  // nothing but Railway's edge). It does NOT fix the BFF-relay case: a request the
+  // `web` app relays server-side arrives at the edge as coming from `web`'s own
+  // server, so trusting Railway's edge correctly reports `web`'s IP — still not the
+  // real browser's IP. That case is handled separately by TrustedIpThrottlerGuard
+  // (secret-gated `x-forwarded-client-ip`), see src/common/guards.
+  //
+  // `1` assumes exactly one trusted hop in front of this container (Railway's own
+  // edge) and that it APPENDS the real client IP to X-Forwarded-For rather than
+  // passing a client-supplied header through verbatim — if that assumption is ever
+  // wrong (Railway changes behavior, or a new CDN/load balancer is inserted in
+  // front of Railway without updating this number), req.ip silently becomes
+  // attacker-controlled and every per-IP rate limit becomes spoofable. Re-verify
+  // this assumption against whatever's actually in front of the container before
+  // changing deployment infrastructure.
+  const expressInstance = app.getHttpAdapter().getInstance() as Express;
+  expressInstance.set('trust proxy', 1);
 
   app.use(requestLoggingMiddleware());
   // CSP disabled: this is a JSON API whose only HTML surface is the dev-only

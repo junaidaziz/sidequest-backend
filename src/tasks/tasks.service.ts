@@ -7,6 +7,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  ModerationTargetType,
   NotificationType,
   Prisma,
   TaskSubmissionStatus,
@@ -20,6 +21,7 @@ import { StorageService } from '../storage/storage.service';
 import { IdempotencyService } from '../idempotency/idempotency.service';
 import { ReferralsService } from '../referrals/referrals.service';
 import { NotificationsService, NotifyParams } from '../notifications/notifications.service';
+import { ReportsService } from '../moderation/reports.service';
 import { CreateTaskDto } from './dto/create-task.dto';
 import { UpdateTaskDto } from './dto/update-task.dto';
 import { ListTasksQueryDto } from './dto/list-tasks-query.dto';
@@ -89,6 +91,7 @@ export class TasksService {
     private readonly idempotency: IdempotencyService,
     private readonly referrals: ReferralsService,
     private readonly notifications: NotificationsService,
+    private readonly reports: ReportsService,
   ) {}
 
   // --------------------------------------------------------------------------
@@ -464,7 +467,8 @@ export class TasksService {
       throw new NotFoundException('Task not found');
     }
     this.assertParticipant(task, userId);
-    return Promise.all(task.submissions.map((s) => this.mapSubmission(s)));
+    const visible = await this.visibleSubmissions(userId, task.submissions);
+    return Promise.all(visible.map((s) => this.mapSubmission(s)));
   }
 
   async reviewSubmission(
@@ -762,13 +766,34 @@ export class TasksService {
   }
 
   private async mapDetail(task: TaskWithSubmissions, viewerId: string): Promise<TaskDetailDto> {
-    const submissions = await Promise.all(task.submissions.map((s) => this.mapSubmission(s)));
+    const visible = await this.visibleSubmissions(viewerId, task.submissions);
+    const submissions = await Promise.all(visible.map((s) => this.mapSubmission(s)));
     return {
       ...this.mapTask(task),
       // Only the creator sees the raw invite token.
       inviteToken: task.creatorId === viewerId ? task.inviteToken : null,
       submissions,
     };
+  }
+
+  /**
+   * Drops submissions the viewer must not see because they (or a second distinct
+   * reporter, via a global hide) reported them (P0 gap #6). Since participants
+   * see each other's submissions here, a reported submission would otherwise stay
+   * visible to the reporter forever. Delegates the hide lookup to ReportsService
+   * (one batched query pair, not a per-submission fan-out) rather than
+   * re-querying HiddenContent/GlobalContentHide directly.
+   */
+  private async visibleSubmissions<T extends { id: string }>(
+    viewerId: string,
+    submissions: T[],
+  ): Promise<T[]> {
+    const hidden = await this.reports.filterHiddenTargetIds(
+      viewerId,
+      ModerationTargetType.UserTaskSubmission,
+      submissions.map((s) => s.id),
+    );
+    return hidden.size === 0 ? submissions : submissions.filter((s) => !hidden.has(s.id));
   }
 
   private async mapSubmission(

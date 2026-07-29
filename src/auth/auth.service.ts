@@ -9,14 +9,19 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService, JwtSignOptions } from '@nestjs/jwt';
 import { Prisma, User } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
-import { createHash, randomUUID } from 'crypto';
+import { createHash, randomBytes, randomUUID } from 'crypto';
 import { OAuth2Client } from 'google-auth-library';
 import { PrismaService } from '../prisma/prisma.service';
+import { RedisService } from '../redis/redis.service';
+import { EmailService } from '../email/email.service';
 import { StorageService } from '../storage/storage.service';
 import { MediaService } from '../media/media.service';
 import { ReferralsService } from '../referrals/referrals.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AuthResponseDto } from './dto/auth-response.dto';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
+import { PasswordResetResponseDto } from './dto/password-reset-response.dto';
 import { AuthTokensDto } from './dto/auth-tokens.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { ChangePasswordResponseDto } from './dto/change-password-response.dto';
@@ -27,6 +32,7 @@ import { LoginDto } from './dto/login.dto';
 import { LogoutResponseDto } from './dto/logout-response.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { SignupDto } from './dto/signup.dto';
+import { UpdateProfileDto } from './dto/update-profile.dto';
 import { UserProfileDto } from './dto/user-profile.dto';
 import { JwtPayload, TokenType } from './types/jwt-payload.interface';
 
@@ -58,6 +64,8 @@ const NO_PASSWORD_ACCOUNT_ERROR =
  * bcrypt.compare() call is a timing side-channel that leaks account existence.
  */
 const DUMMY_BCRYPT_HASH = '$2b$12$NRa8c1JQWgpx8Ftwwgz8VOc967Tx.VK9IeZ02zmPkAFFnoiY0bnMK';
+/** Consumer password-reset token lifetime — matches the admin surface's 1 hour. */
+const RESET_TTL_SECONDS = 3600;
 
 interface TokenSet {
   accessToken: string;
@@ -74,6 +82,8 @@ export class AuthService {
   private readonly guestRefreshTtl: string;
   private readonly googleWebClientId: string;
   private readonly googleIosClientId: string;
+  /** Base URL the emailed consumer reset link points at (public web app). */
+  private readonly webAppUrl: string;
   /**
    * Stateless verifier for Google-issued ID tokens. Instantiated without a
    * client id/secret because we only ever *verify* tokens (audience is passed
@@ -84,6 +94,8 @@ export class AuthService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
+    private readonly redis: RedisService,
+    private readonly email: EmailService,
     private readonly storage: StorageService,
     private readonly media: MediaService,
     private readonly referrals: ReferralsService,
@@ -96,6 +108,7 @@ export class AuthService {
     this.guestRefreshTtl = config.getOrThrow<string>('GUEST_TOKEN_TTL');
     this.googleWebClientId = config.getOrThrow<string>('GOOGLE_OAUTH_WEB_CLIENT_ID');
     this.googleIosClientId = config.getOrThrow<string>('GOOGLE_OAUTH_IOS_CLIENT_ID');
+    this.webAppUrl = config.get<string>('WEB_APP_URL') ?? 'http://localhost:3000';
   }
 
   /** Bootstraps an anonymous session: a credential-less guest User + token pair. */
@@ -452,17 +465,24 @@ export class AuthService {
   }
 
   /**
-   * Updates the authenticated user's display name and returns the refreshed
-   * profile. The caller is already authenticated (JwtAuthGuard + JwtStrategy
-   * confirmed the row exists and is not soft-deleted), so a plain update mirrors
-   * logout()'s trust model rather than re-reading first.
+   * Updates the authenticated user's mutable profile fields (`displayName`
+   * and/or `timezone`) and returns the refreshed profile. Only the fields the
+   * DTO actually carries are written, so a timezone-only update never blanks the
+   * display name and vice versa. The caller is already authenticated (JwtAuthGuard
+   * + JwtStrategy confirmed the row exists and is not soft-deleted), so a plain
+   * update mirrors logout()'s trust model rather than re-reading first. The DTO
+   * has already validated `timezone` as a real IANA zone name, so the value
+   * stored here is one `streak.util`'s `Intl` calls will accept.
    */
-  async updateDisplayName(userId: string, displayName: string): Promise<UserProfileDto> {
-    const updated = await this.prisma.user.update({
-      where: { id: userId },
-      data: { displayName },
-    });
-    this.logger.log(`Display name updated for user ${userId}`);
+  async updateProfile(userId: string, dto: UpdateProfileDto): Promise<UserProfileDto> {
+    const data: Prisma.UserUpdateInput = {
+      ...(dto.displayName !== undefined ? { displayName: dto.displayName } : {}),
+      ...(dto.timezone !== undefined ? { timezone: dto.timezone } : {}),
+    };
+    const updated = await this.prisma.user.update({ where: { id: userId }, data });
+    this.logger.log(
+      `Profile updated for user ${userId} (${Object.keys(data).join(', ') || 'none'})`,
+    );
     return this.toProfile(updated);
   }
 
@@ -509,6 +529,80 @@ export class AuthService {
     });
     this.logger.log(`Password changed for user ${userId}; refresh token revoked`);
     return { success: true };
+  }
+
+  /**
+   * Always-200 password-reset request for a consumer account. Mirrors the
+   * admin-auth surface's `forgotPassword`: it reveals nothing about whether the
+   * email maps to an account (the controller always returns `success: true`),
+   * generates a single-use token whose hash is stored in Redis keyed by the user
+   * id (so each new request OVERWRITES the previous — only the newest link is
+   * valid), and emails a reset link best-effort via EmailService.
+   *
+   * Only a real, password-capable, live account gets a token: a guest / Google-
+   * only account (no `passwordHash`), a soft-deleted account, or a suspended one
+   * is skipped — there is no consumer password to reset in those cases. Timing is
+   * equalized with a throwaway bcrypt hash on the skip path so response time is
+   * not an account-existence oracle (same technique as `login`).
+   */
+  async forgotPassword(dto: ForgotPasswordDto): Promise<void> {
+    const user = await this.prisma.user.findUnique({ where: { email: dto.email } });
+    if (!user || !user.passwordHash || user.deletedAt || user.suspendedAt) {
+      // Equalize timing with the token-minting path so an unknown/ineligible
+      // email costs the same wall-clock time as an eligible one — same
+      // DUMMY_BCRYPT_HASH technique as `login`, not a cheap throwaway hash
+      // (a low-cost hash here would still leave a measurable timing gap).
+      await bcrypt.compare(dto.email, DUMMY_BCRYPT_HASH);
+      return;
+    }
+
+    const raw = `${user.id}.${randomBytes(32).toString('base64url')}`;
+    await this.redis.set(this.resetKey(user.id), this.digest(raw), 'EX', RESET_TTL_SECONDS);
+    const url = `${this.webAppUrl}/reset-password?token=${raw}`;
+    await this.email.sendPasswordReset(user.email as string, url);
+    this.logger.log(`Password reset requested for user ${user.id}`);
+  }
+
+  /**
+   * Completes a consumer password reset. Validates the single-use token (the id
+   * prefix it carries locates the one active token for that user; the submitted
+   * token must hash to the stored value), sets a fresh bcrypt hash, and REVOKES
+   * the refresh token so every existing session is invalidated — consistent with
+   * how `changePassword` already revokes on a password change. The token is
+   * consumed (deleted from Redis) on success so it can never be replayed. Any
+   * failure mode — malformed token, expired/absent stored hash, mismatch, or a
+   * since-deleted user — collapses to the same generic 400 so nothing leaks.
+   */
+  async resetPassword(dto: ResetPasswordDto): Promise<PasswordResetResponseDto> {
+    const userId = this.parseResetTokenUserId(dto.token);
+    const storedHash = userId ? await this.redis.get(this.resetKey(userId)) : null;
+    if (!userId || !storedHash || storedHash !== this.digest(dto.token)) {
+      throw new BadRequestException('Invalid or expired reset token');
+    }
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user || user.deletedAt || !user.passwordHash) {
+      throw new BadRequestException('Invalid or expired reset token');
+    }
+
+    const passwordHash = await bcrypt.hash(dto.newPassword, BCRYPT_ROUNDS);
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { passwordHash, refreshTokenHash: null, refreshPreviousTokenHash: null },
+    });
+    await this.redis.del(this.resetKey(userId));
+    this.logger.log(`Password reset completed for user ${userId}; refresh token revoked`);
+    return { success: true };
+  }
+
+  /** Reset tokens are keyed by user id (one active token per user — newest wins). */
+  private resetKey(userId: string): string {
+    return `user:pwreset:${userId}`;
+  }
+
+  /** Extracts the `<userId>.` prefix a reset token carries; null if malformed. */
+  private parseResetTokenUserId(token: string): string | null {
+    const idx = token.indexOf('.');
+    return idx > 0 ? token.slice(0, idx) : null;
   }
 
   /**
@@ -857,6 +951,7 @@ export class AuthService {
       email: user.email,
       displayName: user.displayName,
       isGuest: user.isGuest,
+      timezone: user.timezone,
       avatarUrl,
       avatarVariants,
     };

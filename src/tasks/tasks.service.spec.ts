@@ -4,12 +4,18 @@ import {
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
-import { TaskSubmissionStatus, TaskVerificationMethod, UserTaskStatus } from '@prisma/client';
+import {
+  ModerationTargetType,
+  TaskSubmissionStatus,
+  TaskVerificationMethod,
+  UserTaskStatus,
+} from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { IdempotencyService, IdempotentRunParams } from '../idempotency/idempotency.service';
 import { ReferralsService } from '../referrals/referrals.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { ReportsService } from '../moderation/reports.service';
 import { TasksService } from './tasks.service';
 
 const CREATOR = 'creator-1';
@@ -72,6 +78,7 @@ describe('TasksService', () => {
   let idempotency: { run: jest.Mock };
   let referrals: { recordCompletionIfQualifying: jest.Mock };
   let notifications: { notify: jest.Mock };
+  let reports: { filterHiddenTargetIds: jest.Mock };
 
   beforeEach(() => {
     tx = {
@@ -111,12 +118,16 @@ describe('TasksService', () => {
       recordCompletionIfQualifying: jest.fn().mockResolvedValue(undefined),
     };
     notifications = { notify: jest.fn().mockResolvedValue(undefined) };
+    // Nothing hidden by default; the reporting integration is exercised
+    // explicitly in the hide-filter tests below.
+    reports = { filterHiddenTargetIds: jest.fn().mockResolvedValue(new Set<string>()) };
     service = new TasksService(
       prisma as unknown as PrismaService,
       storage as unknown as StorageService,
       idempotency as unknown as IdempotencyService,
       referrals as unknown as ReferralsService,
       notifications as unknown as NotificationsService,
+      reports as unknown as ReportsService,
     );
   });
 
@@ -261,6 +272,30 @@ describe('TasksService', () => {
       });
       const detail = await service.getTask(CREATOR, TASK_ID);
       expect(detail.submissions[0].attachments[0].url).toBe('https://signed.example/x');
+    });
+
+    it('omits a submission the viewer has reported from the inlined detail (P0 gap #6)', async () => {
+      prisma.userTask.findUnique.mockResolvedValue({
+        ...baseTask({ assigneeId: ASSIGNEE }),
+        submissions: [
+          {
+            id: 'sub-hidden',
+            submittedById: ASSIGNEE,
+            notes: null,
+            status: TaskSubmissionStatus.Submitted,
+            submittedAt: new Date(),
+            reviewedAt: null,
+            reviewedById: null,
+            rejectionReason: null,
+            attachments: [],
+          },
+        ],
+      });
+      reports.filterHiddenTargetIds.mockResolvedValue(new Set(['sub-hidden']));
+
+      const detail = await service.getTask(CREATOR, TASK_ID);
+
+      expect(detail.submissions).toEqual([]);
     });
   });
 
@@ -645,6 +680,34 @@ describe('TasksService', () => {
       prisma.userTask.findUnique.mockResolvedValue({ ...baseTask(), submissions: [] });
       const result = await service.listSubmissions(CREATOR, TASK_ID);
       expect(result).toEqual([]);
+    });
+
+    it('excludes submissions the viewer has reported (reporter-local / global hide, P0 gap #6)', async () => {
+      const submission = (id: string) => ({
+        id,
+        submittedById: ASSIGNEE,
+        notes: null,
+        status: TaskSubmissionStatus.Submitted,
+        submittedAt: new Date(),
+        reviewedAt: null,
+        reviewedById: null,
+        rejectionReason: null,
+        attachments: [],
+      });
+      prisma.userTask.findUnique.mockResolvedValue({
+        ...baseTask({ assigneeId: ASSIGNEE }),
+        submissions: [submission('sub-visible'), submission('sub-hidden')],
+      });
+      reports.filterHiddenTargetIds.mockResolvedValue(new Set(['sub-hidden']));
+
+      const result = await service.listSubmissions(CREATOR, TASK_ID);
+
+      expect(reports.filterHiddenTargetIds).toHaveBeenCalledWith(
+        CREATOR,
+        ModerationTargetType.UserTaskSubmission,
+        ['sub-visible', 'sub-hidden'],
+      );
+      expect(result.map((s) => s.id)).toEqual(['sub-visible']);
     });
   });
 

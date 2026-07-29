@@ -19,8 +19,11 @@ import { ChangePasswordDto } from './dto/change-password.dto';
 import { ChangePasswordResponseDto } from './dto/change-password-response.dto';
 import { DeleteAccountDto } from './dto/delete-account.dto';
 import { DeleteAccountResponseDto } from './dto/delete-account-response.dto';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { GoogleAuthDto } from './dto/google-auth.dto';
 import { LoginDto } from './dto/login.dto';
+import { PasswordResetResponseDto } from './dto/password-reset-response.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
 import { LogoutDto } from './dto/logout.dto';
 import { LogoutResponseDto } from './dto/logout-response.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
@@ -111,6 +114,46 @@ export class AuthController {
     return this.authService.login(dto);
   }
 
+  // Same sensitive tier (5/60s) as login/signup per backend/CLAUDE.md — an
+  // unauthenticated endpoint that triggers an email send, so it must be throttled
+  // tightly to cap both brute-force enumeration attempts and email spam.
+  @Post('forgot-password')
+  @Throttle(SENSITIVE_THROTTLE)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Request a consumer password-reset email',
+    description:
+      'Always returns 200 with { success: true }, regardless of whether the email ' +
+      'maps to an account, to avoid leaking account existence. When it does map to ' +
+      'a live password account, a single-use, time-limited reset link is emailed.',
+  })
+  @ApiResponse({ status: 200, type: PasswordResetResponseDto })
+  @ApiResponse({ status: 400, description: 'Validation failed' })
+  @ApiResponse({ status: 429, description: 'Too many requests' })
+  async forgotPassword(@Body() dto: ForgotPasswordDto): Promise<PasswordResetResponseDto> {
+    await this.authService.forgotPassword(dto);
+    return { success: true };
+  }
+
+  // Same sensitive tier (5/60s) — validates a reset token and mutates the
+  // credential; brute-force of the token warrants tight limiting.
+  @Post('reset-password')
+  @Throttle(SENSITIVE_THROTTLE)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Complete a consumer password reset with the emailed token',
+    description:
+      'Validates the single-use token, stores a new bcrypt hash, and revokes the ' +
+      "user's refresh token so existing sessions are invalidated (consistent with " +
+      'PATCH /auth/password).',
+  })
+  @ApiResponse({ status: 200, type: PasswordResetResponseDto })
+  @ApiResponse({ status: 400, description: 'Validation failed, or invalid/expired token' })
+  @ApiResponse({ status: 429, description: 'Too many requests' })
+  resetPassword(@Body() dto: ResetPasswordDto): Promise<PasswordResetResponseDto> {
+    return this.authService.resetPassword(dto);
+  }
+
   @Post('refresh')
   @Throttle(REFRESH_THROTTLE)
   @HttpCode(HttpStatus.OK)
@@ -157,13 +200,18 @@ export class AuthController {
   @Patch('me')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
-  @ApiOperation({ summary: "Update the authenticated user's display name" })
+  @ApiOperation({
+    summary: "Update the authenticated user's profile (display name and/or timezone)",
+  })
   @ApiResponse({ status: 200, type: UserProfileDto })
-  @ApiResponse({ status: 400, description: 'displayName missing or outside the 1-50 char range' })
+  @ApiResponse({
+    status: 400,
+    description: 'displayName outside the 1-50 char range, or timezone is not a valid IANA zone',
+  })
   @ApiResponse({ status: 401, description: 'Missing or invalid access token' })
   @ApiResponse({ status: 429, description: 'Too many requests' })
   updateMe(@CurrentUser() user: AuthUser, @Body() dto: UpdateProfileDto): Promise<UserProfileDto> {
-    return this.authService.updateDisplayName(user.userId, dto.displayName);
+    return this.authService.updateProfile(user.userId, dto);
   }
 
   // Same sensitive tier (5/60s) as login/signup/google — a password change is a

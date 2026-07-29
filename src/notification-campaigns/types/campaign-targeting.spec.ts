@@ -54,4 +54,34 @@ describe('buildTargetWhere', () => {
     const where = buildTargetWhere({ pushPlatform: CampaignPushPlatform.Ios });
     expect(where.pushTokens).toEqual({ some: { platform: 'ios', disabledAt: null } });
   });
+
+  it('maps a single userIds entry onto id IN (single-user targeting)', () => {
+    const where = buildTargetWhere({ userIds: ['user-1'] });
+    expect(where.id).toEqual({ in: ['user-1'] });
+    // The always-on exclusions remain AND-combined, so a targeted deleted/
+    // suspended user is still excluded.
+    expect(where.deletedAt).toBeNull();
+    expect(where.suspendedAt).toBeNull();
+  });
+
+  it('maps multiple userIds onto id IN', () => {
+    const where = buildTargetWhere({ userIds: ['a', 'b', 'c'] });
+    expect(where.id).toEqual({ in: ['a', 'b', 'c'] });
+  });
+
+  it('maps an empty userIds array onto id IN [] (matches no one, by design)', () => {
+    const where = buildTargetWhere({ userIds: [] });
+    expect(where.id).toEqual({ in: [] });
+  });
+
+  it('AND-combines userIds with other cohort dimensions', () => {
+    const where = buildTargetWhere({ userIds: ['user-1'], isGuest: false, minTotalXp: 100 });
+    expect(where.id).toEqual({ in: ['user-1'] });
+    expect(where.isGuest).toBe(false);
+    expect(where.totalXp).toEqual({ gte: 100 });
+  });
+
+  it('omits the id clause entirely when userIds is absent', () => {
+    expect(buildTargetWhere({ isGuest: true }).id).toBeUndefined();
+  });
 });

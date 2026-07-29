@@ -4,8 +4,11 @@ import { JwtService } from '@nestjs/jwt';
 import { Test, TestingModule } from '@nestjs/testing';
 import { Prisma, User } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
+import { createHash } from 'crypto';
 import { OAuth2Client } from 'google-auth-library';
 import { PrismaService } from '../prisma/prisma.service';
+import { RedisService } from '../redis/redis.service';
+import { EmailService } from '../email/email.service';
 import { StorageService } from '../storage/storage.service';
 import { MediaService } from '../media/media.service';
 import { ReferralsService } from '../referrals/referrals.service';
@@ -65,6 +68,7 @@ function buildUser(overrides: Partial<User> = {}): User {
     currentStreak: 0,
     longestStreak: 0,
     lastCompletionDate: null,
+    timezone: 'UTC',
     createdAt: new Date(),
     updatedAt: new Date(),
     deletedAt: null,
@@ -98,6 +102,8 @@ describe('AuthService', () => {
   let media: { resolveVariantsForAsset: jest.Mock; deleteMedia: jest.Mock };
   let referrals: { resolveReferrer: jest.Mock; attributeSignup: jest.Mock };
   let notifications: { deregisterPushToken: jest.Mock; deregisterAllPushTokens: jest.Mock };
+  let redis: { set: jest.Mock; get: jest.Mock; del: jest.Mock };
+  let email: { sendPasswordReset: jest.Mock };
 
   beforeEach(async () => {
     bcryptHash.mockReset().mockResolvedValue('bcrypt-hash');
@@ -146,19 +152,32 @@ describe('AuthService', () => {
       deregisterPushToken: jest.fn().mockResolvedValue({ success: true, removed: 1 }),
       deregisterAllPushTokens: jest.fn().mockResolvedValue({ success: true, removed: 2 }),
     };
+    redis = {
+      set: jest.fn().mockResolvedValue('OK'),
+      get: jest.fn().mockResolvedValue(null),
+      del: jest.fn().mockResolvedValue(1),
+    };
+    email = {
+      sendPasswordReset: jest.fn().mockResolvedValue({ status: 'ok' }),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AuthService,
         { provide: PrismaService, useValue: prisma },
         { provide: JwtService, useValue: jwtService },
+        { provide: RedisService, useValue: redis },
+        { provide: EmailService, useValue: email },
         { provide: StorageService, useValue: storage },
         { provide: MediaService, useValue: media },
         { provide: ReferralsService, useValue: referrals },
         { provide: NotificationsService, useValue: notifications },
         {
           provide: ConfigService,
-          useValue: { getOrThrow: (key: string): string => CONFIG[key] },
+          useValue: {
+            getOrThrow: (key: string): string => CONFIG[key],
+            get: (key: string): string | undefined => CONFIG[key],
+          },
         },
       ],
     }).compile();
@@ -194,6 +213,7 @@ describe('AuthService', () => {
           email: null,
           displayName: 'Ada',
           isGuest: true,
+          timezone: 'UTC',
           avatarUrl: null,
           avatarVariants: [],
         },
@@ -560,6 +580,7 @@ describe('AuthService', () => {
           email: 'ada@example.com',
           displayName: 'Ada',
           isGuest: false,
+          timezone: 'UTC',
           avatarUrl: null,
           avatarVariants: [],
         },
@@ -861,6 +882,7 @@ describe('AuthService', () => {
           email: 'ada@example.com',
           displayName: 'Ada',
           isGuest: false,
+          timezone: 'UTC',
           avatarUrl: null,
           avatarVariants: [],
         },
@@ -957,6 +979,7 @@ describe('AuthService', () => {
           email: 'ada@example.com',
           displayName: 'Ada',
           isGuest: false,
+          timezone: 'UTC',
           avatarUrl: null,
           avatarVariants: [],
         },
@@ -1169,6 +1192,7 @@ describe('AuthService', () => {
         email: 'ada@example.com',
         displayName: 'Ada',
         isGuest: false,
+        timezone: 'UTC',
         avatarUrl: null,
         avatarVariants: [],
       });
@@ -1198,11 +1222,11 @@ describe('AuthService', () => {
     });
   });
 
-  describe('updateDisplayName', () => {
-    it('updates the display name and returns the refreshed profile', async () => {
+  describe('updateProfile', () => {
+    it('updates only the display name when that is the sole field supplied', async () => {
       prisma.user.update.mockResolvedValue(buildUser({ displayName: 'New Name' }));
 
-      const profile = await service.updateDisplayName('user-1', 'New Name');
+      const profile = await service.updateProfile('user-1', { displayName: 'New Name' });
 
       expect(prisma.user.update).toHaveBeenCalledWith({
         where: { id: 'user-1' },
@@ -1213,9 +1237,43 @@ describe('AuthService', () => {
         email: 'ada@example.com',
         displayName: 'New Name',
         isGuest: false,
+        timezone: 'UTC',
         avatarUrl: null,
         avatarVariants: [],
       });
+    });
+
+    it('updates only the timezone when that is the sole field supplied (never blanks displayName)', async () => {
+      prisma.user.update.mockResolvedValue(buildUser({ timezone: 'America/New_York' }));
+
+      const profile = await service.updateProfile('user-1', { timezone: 'America/New_York' });
+
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'user-1' },
+        data: { timezone: 'America/New_York' },
+      });
+      expect(profile.timezone).toBe('America/New_York');
+    });
+
+    it('updates both fields when both are supplied', async () => {
+      prisma.user.update.mockResolvedValue(
+        buildUser({ displayName: 'New Name', timezone: 'Europe/Paris' }),
+      );
+
+      await service.updateProfile('user-1', { displayName: 'New Name', timezone: 'Europe/Paris' });
+
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'user-1' },
+        data: { displayName: 'New Name', timezone: 'Europe/Paris' },
+      });
+    });
+
+    it('issues an empty-data no-op update when neither field is supplied', async () => {
+      prisma.user.update.mockResolvedValue(buildUser());
+
+      await service.updateProfile('user-1', {});
+
+      expect(prisma.user.update).toHaveBeenCalledWith({ where: { id: 'user-1' }, data: {} });
     });
 
     it('resolves avatarUrl in the returned profile when the row has an avatar key', async () => {
@@ -1223,7 +1281,7 @@ describe('AuthService', () => {
         buildUser({ displayName: 'New Name', avatarUrl: 'avatars/user-1/pic.png' }),
       );
 
-      const profile = await service.updateDisplayName('user-1', 'New Name');
+      const profile = await service.updateProfile('user-1', { displayName: 'New Name' });
 
       expect(storage.getSignedDownloadUrl).toHaveBeenCalledWith('avatars/user-1/pic.png');
       expect(profile.avatarUrl).toBe('https://signed.example/avatar');
@@ -1456,4 +1514,123 @@ describe('AuthService', () => {
       );
     });
   });
+
+  describe('forgotPassword', () => {
+    it('stores a hashed token and emails a reset link for a live password account', async () => {
+      prisma.user.findUnique.mockResolvedValue(buildUser({ id: 'user-1' }));
+
+      await service.forgotPassword({ email: 'ada@example.com' });
+
+      expect(redis.set).toHaveBeenCalledTimes(1);
+      const [key, , mode, ttl] = redis.set.mock.calls[0];
+      expect(key).toBe('user:pwreset:user-1');
+      expect(mode).toBe('EX');
+      expect(ttl).toBe(3600);
+      // The emailed URL embeds the RAW token (prefixed with the user id), while
+      // only its SHA-256 hash is persisted — the stored value must never equal
+      // the token in the link.
+      const storedHash = redis.set.mock.calls[0][1] as string;
+      const emailedUrl = email.sendPasswordReset.mock.calls[0][1] as string;
+      const rawToken = emailedUrl.split('token=')[1];
+      expect(rawToken.startsWith('user-1.')).toBe(true);
+      expect(storedHash).not.toBe(rawToken);
+      expect(email.sendPasswordReset).toHaveBeenCalledWith(
+        'ada@example.com',
+        expect.stringContaining('/reset-password?token=user-1.'),
+      );
+    });
+
+    it('is a silent no-op (no token, no email) for an unknown email', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+
+      await service.forgotPassword({ email: 'nobody@example.com' });
+
+      expect(redis.set).not.toHaveBeenCalled();
+      expect(email.sendPasswordReset).not.toHaveBeenCalled();
+      // Timing-equalization compare still runs so response time can't be an oracle
+      // (same DUMMY_BCRYPT_HASH technique as `login`, not a cheap throwaway hash).
+      expect(bcryptCompare).toHaveBeenCalledWith('nobody@example.com', expect.any(String));
+    });
+
+    it('is a no-op for a passwordless (Google/guest) account', async () => {
+      prisma.user.findUnique.mockResolvedValue(buildUser({ passwordHash: null }));
+
+      await service.forgotPassword({ email: 'ada@example.com' });
+
+      expect(redis.set).not.toHaveBeenCalled();
+      expect(email.sendPasswordReset).not.toHaveBeenCalled();
+    });
+
+    it('is a no-op for a suspended account', async () => {
+      prisma.user.findUnique.mockResolvedValue(buildUser({ suspendedAt: new Date() }));
+
+      await service.forgotPassword({ email: 'ada@example.com' });
+
+      expect(redis.set).not.toHaveBeenCalled();
+      expect(email.sendPasswordReset).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('resetPassword', () => {
+    const token = 'user-1.rawsecret';
+
+    it('rejects a malformed token (no id prefix) with 400', async () => {
+      await expect(
+        service.resetPassword({ token: 'no-dot', newPassword: 'n3w-password' }),
+      ).rejects.toThrow(BadRequestException);
+      expect(redis.get).not.toHaveBeenCalled();
+    });
+
+    it('rejects when no active token is stored for the user', async () => {
+      redis.get.mockResolvedValue(null);
+
+      await expect(service.resetPassword({ token, newPassword: 'n3w-password' })).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('rejects when the stored hash does not match the submitted token', async () => {
+      redis.get.mockResolvedValue('a-different-hash');
+
+      await expect(service.resetPassword({ token, newPassword: 'n3w-password' })).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('rejects when the referenced user is gone or soft-deleted', async () => {
+      // Stored hash matches the token digest, but the user no longer exists.
+      redis.get.mockImplementation(async () => digestOf(token));
+      prisma.user.findUnique.mockResolvedValue(null);
+
+      await expect(service.resetPassword({ token, newPassword: 'n3w-password' })).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('sets the new hash, revokes the refresh token, and consumes the token on success', async () => {
+      redis.get.mockImplementation(async () => digestOf(token));
+      prisma.user.findUnique.mockResolvedValue(buildUser({ id: 'user-1' }));
+      bcryptHash.mockResolvedValue('new-bcrypt-hash');
+
+      await expect(service.resetPassword({ token, newPassword: 'n3w-password' })).resolves.toEqual({
+        success: true,
+      });
+
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'user-1' },
+        data: {
+          passwordHash: 'new-bcrypt-hash',
+          refreshTokenHash: null,
+          refreshPreviousTokenHash: null,
+        },
+      });
+      expect(redis.del).toHaveBeenCalledWith('user:pwreset:user-1');
+    });
+  });
 });
+
+/** Mirrors AuthService's private SHA-256 hex digest so the reset-token specs can
+ * pre-compute the value the service will compare against. */
+function digestOf(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}

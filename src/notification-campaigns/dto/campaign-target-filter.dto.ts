@@ -1,7 +1,25 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsBoolean, IsEnum, IsISO8601, IsInt, IsOptional, Min } from 'class-validator';
+import {
+  ArrayMaxSize,
+  IsArray,
+  IsBoolean,
+  IsEnum,
+  IsISO8601,
+  IsInt,
+  IsOptional,
+  IsUUID,
+  Min,
+} from 'class-validator';
 import { CampaignPushPlatform, CampaignTargetFilter } from '../types/campaign-targeting';
 import { IsGreaterOrEqualToField, IsNotSetWithField } from '../validators/target-range.validator';
+
+/**
+ * Upper bound on an explicit `userIds` list. This dimension exists for
+ * single-user / small hand-picked support targeting, not bulk cohorts (those
+ * use the filter dimensions below), so the array is deliberately capped to keep
+ * the `id IN (...)` clause and the fan-out bounded.
+ */
+const MAX_TARGET_USER_IDS = 1000;
 
 /**
  * Structured targeting criteria for a campaign. Every dimension is optional; an
@@ -14,6 +32,21 @@ import { IsGreaterOrEqualToField, IsNotSetWithField } from '../validators/target
  * a per-recipient delivery gate at send time, not part of `targetFilter`.
  */
 export class CampaignTargetFilterDto implements CampaignTargetFilter {
+  @ApiPropertyOptional({
+    type: [String],
+    format: 'uuid',
+    maxItems: MAX_TARGET_USER_IDS,
+    description:
+      'Target specific users by id (single-user or hand-picked set). AND-combined ' +
+      'with every other dimension and the always-on soft-delete/suspension exclusions. ' +
+      'A 1-element array creates a 1-recipient campaign via the normal create/send flow.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(MAX_TARGET_USER_IDS)
+  @IsUUID('all', { each: true })
+  userIds?: string[];
+
   @ApiPropertyOptional({
     format: 'date-time',
     description: 'Registered on/after this instant (User.createdAt >=)',

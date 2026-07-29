@@ -38,6 +38,57 @@ describe('EmailService', () => {
     expect(message.text).toContain('https://x/reset?token=abc');
   });
 
+  it('composes a consumer password-reset email with the reset url', async () => {
+    await service.sendPasswordReset('user@b.com', 'https://app/reset-password?token=abc');
+    const message = client.send.mock.calls[0][0];
+    expect(message.to).toBe('user@b.com');
+    expect(message.subject).toBe('Reset your SideQuest password');
+    expect(message.html).toContain('https://app/reset-password?token=abc');
+    expect(message.text).toContain('https://app/reset-password?token=abc');
+  });
+
+  it('escapes a malicious reset url in the consumer reset email', async () => {
+    await service.sendPasswordReset(
+      'user@b.com',
+      'https://app/reset?x="><script>alert(1)</script>',
+    );
+    const message = client.send.mock.calls[0][0];
+    expect(message.html).not.toContain('<script>');
+    expect(message.html).toContain('&lt;script&gt;');
+  });
+
+  it('composes a contact-form notification with every field, HTML-escaped', async () => {
+    await service.sendContactFormNotification('ops@b.com', {
+      name: 'Ada',
+      email: 'ada@example.com',
+      topic: 'Partnership',
+      message: 'Line one\nLine two',
+    });
+    const message = client.send.mock.calls[0][0];
+    expect(message.to).toBe('ops@b.com');
+    expect(message.subject).toContain('Partnership');
+    expect(message.html).toContain('Ada');
+    expect(message.html).toContain('ada@example.com');
+    // Newlines become <br> in the HTML body.
+    expect(message.html).toContain('Line one<br>Line two');
+    // Plain-text keeps the original newline.
+    expect(message.text).toContain('Line one\nLine two');
+  });
+
+  it('escapes attacker-controlled contact fields (stored XSS guard)', async () => {
+    await service.sendContactFormNotification('ops@b.com', {
+      name: '<img src=x onerror=alert(1)>',
+      email: 'a@b.com',
+      topic: 'Hi',
+      message: '<b>bold</b>',
+    });
+    const message = client.send.mock.calls[0][0];
+    expect(message.html).not.toContain('<img');
+    expect(message.html).toContain('&lt;img');
+    expect(message.html).not.toContain('<b>bold</b>');
+    expect(message.html).toContain('&lt;b&gt;bold&lt;/b&gt;');
+  });
+
   it('composes an invite email with the inviter name and accept url', async () => {
     await service.sendAdminInvite('a@b.com', 'Owner', 'https://x/accept?token=abc');
     const message = client.send.mock.calls[0][0];

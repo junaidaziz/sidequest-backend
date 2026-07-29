@@ -265,6 +265,38 @@ const REFERRAL_REWARD_RULE = {
   isActive: true,
 };
 
+/**
+ * The crew/setting tag vocabulary, ported verbatim from the previously-hardcoded
+ * onboarding constants (see src/missions/dto/generate-missions.dto.ts —
+ * CREW_VALUES / SETTING_VALUES, themselves mirroring the admin web app's
+ * MissionForm.tsx) so nothing regresses. `Anywhere` is intentionally OMITTED: it
+ * is a request-side "any setting" wildcard, never a value stored on a mission's
+ * `settingTags`, so it is not part of the manageable tag vocabulary.
+ */
+const MISSION_TAGS: { type: 'Crew' | 'Setting'; value: string }[] = [
+  { type: 'Crew', value: 'Solo' },
+  { type: 'Crew', value: 'Partner' },
+  { type: 'Crew', value: 'Friends' },
+  { type: 'Crew', value: 'Family' },
+  { type: 'Crew', value: 'Kids Mode' },
+  { type: 'Setting', value: 'Indoors' },
+  { type: 'Setting', value: 'Outdoors' },
+  { type: 'Setting', value: 'City' },
+  { type: 'Setting', value: 'Nature' },
+];
+
+async function seedMissionTags(): Promise<void> {
+  for (let index = 0; index < MISSION_TAGS.length; index++) {
+    const tag = MISSION_TAGS[index];
+    await prisma.missionTag.upsert({
+      where: { type_value: { type: tag.type, value: tag.value } },
+      update: { label: tag.value, sortOrder: index },
+      create: { type: tag.type, value: tag.value, label: tag.value, sortOrder: index },
+    });
+  }
+  console.log(`Seeded ${MISSION_TAGS.length} mission tags.`);
+}
+
 // ---------------------------------------------------------------------------
 // Admin portal (Phase 3) — Permission catalog + system Roles + bootstrap Owner.
 // ---------------------------------------------------------------------------
@@ -307,6 +339,14 @@ const PERMISSIONS: PermissionSeed[] = [
     description: 'Publish, unpublish, approve, or archive challenges',
   },
   { key: 'challenges.feature', category: 'Challenges', description: 'Feature or unfeature challenges' },
+  {
+    key: 'challenges.manage_tags',
+    category: 'Challenges',
+    description: 'Manage the mission crew/setting tag vocabulary',
+  },
+  // Contact submissions (closed-beta admin support tooling)
+  { key: 'contact.view', category: 'Support', description: 'View contact form submissions' },
+  { key: 'contact.manage', category: 'Support', description: 'Update contact submission triage status' },
   // Moderation
   { key: 'moderation.view_queue', category: 'Moderation', description: 'View the moderation queue' },
   { key: 'moderation.remove_content', category: 'Moderation', description: 'Hide or remove reported content' },
@@ -395,6 +435,7 @@ const ROLES: RoleSeed[] = [
       'challenges.delete',
       'challenges.publish',
       'challenges.feature',
+      'challenges.manage_tags',
       'proofs.view',
       'proofs.review',
       'analytics.view',
@@ -424,7 +465,18 @@ const ROLES: RoleSeed[] = [
     description: 'Read-mostly access to help users; can view queues but not act on them.',
     isSystem: false,
     mfaRequired: false,
-    permissions: ['users.view', 'proofs.view', 'moderation.view_queue', 'campaigns.view', 'analytics.view'],
+    permissions: [
+      'users.view',
+      'proofs.view',
+      'moderation.view_queue',
+      'campaigns.view',
+      'analytics.view',
+      // Support agents can read incoming contact submissions. The status-mutation
+      // permission (`contact.manage`) is deliberately NOT granted here, matching
+      // this role's "view queues but not act on them" charter — owner/super_admin
+      // (ALL) hold it. Grant it here too if support agents should resolve tickets.
+      'contact.view',
+    ],
   },
   {
     key: 'analytics_viewer',
@@ -623,6 +675,8 @@ async function main() {
     create: REFERRAL_REWARD_RULE,
   });
   console.log('Seeded 1 referral reward rule (on_referee_first_completion, 50 xp).');
+
+  await seedMissionTags();
 
   // Admin portal (Phase 3): permission catalog -> system roles -> bootstrap Owner.
   const permissionIdByKey = await seedPermissions();

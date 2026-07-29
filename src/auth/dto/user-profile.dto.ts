@@ -18,6 +18,16 @@ export class UserProfileDto {
   @ApiProperty({
     type: String,
     nullable: true,
+    example: 'America/New_York',
+    description:
+      'IANA timezone name the completion streak is computed in (defaults to "UTC"). ' +
+      'Set via PATCH /auth/me; null only on legacy rows predating the column.',
+  })
+  timezone!: string | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
     example: 'https://s3.example.com/avatars/…?X-Amz-Signature=…',
     description:
       'Delivery URL for the profile avatar; null when no avatar is set. When the avatar was ' +

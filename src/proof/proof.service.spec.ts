@@ -49,7 +49,13 @@ function precheckUser(overrides: Record<string, unknown> = {}) {
   return { id: USER_ID, isGuest: true, ...overrides };
 }
 
-/** The row returned by the locked `tx.$queryRaw(... FOR UPDATE)` re-check. */
+/**
+ * The row returned by the locked `tx.$queryRaw(... FOR UPDATE)` re-check.
+ * `timezone` is set explicitly (rather than left undefined to fall back to UTC by
+ * coincidence) so the streak computation's timezone threading is exercised on the
+ * value the service actually reads off the locked row — override it to a non-UTC
+ * zone to assert local-day behaviour.
+ */
 function lockedUserRow(overrides: Record<string, unknown> = {}) {
   return {
     id: USER_ID,
@@ -57,6 +63,7 @@ function lockedUserRow(overrides: Record<string, unknown> = {}) {
     currentStreak: 0,
     longestStreak: 0,
     lastCompletionDate: null,
+    timezone: 'UTC',
     ...overrides,
   };
 }

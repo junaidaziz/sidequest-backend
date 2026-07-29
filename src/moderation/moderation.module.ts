@@ -4,6 +4,8 @@ import { AuditLogModule } from '../audit-log/audit-log.module';
 import { StorageModule } from '../storage/storage.module';
 import { ModerationController } from './moderation.controller';
 import { ModerationService } from './moderation.service';
+import { ReportsController } from './reports.controller';
+import { ReportsService } from './reports.service';
 
 /**
  * Admin moderation (Phase 10): unified proof/submission review queue plus the
@@ -21,7 +23,10 @@ import { ModerationService } from './moderation.service';
  */
 @Module({
   imports: [AdminModule, AuditLogModule, StorageModule],
-  controllers: [ModerationController],
-  providers: [ModerationService],
+  controllers: [ModerationController, ReportsController],
+  providers: [ModerationService, ReportsService],
+  // Exported so consumer read paths (tasks, proof) can reuse the hide filters
+  // when they adopt reporter-local/global-hide visibility.
+  exports: [ReportsService],
 })
 export class ModerationModule {}

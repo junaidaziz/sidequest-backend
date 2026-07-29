@@ -1,4 +1,4 @@
-import { computeStreak, toUtcMidnight } from './streak.util';
+import { civilDayToUtcMidnight, computeStreak, toUtcMidnight } from './streak.util';
 
 describe('streak.util', () => {
   describe('toUtcMidnight', () => {
@@ -92,6 +92,85 @@ describe('streak.util', () => {
 
       expect(result.currentStreak).toBe(4);
       expect(result.longestStreak).toBe(4);
+    });
+  });
+
+  describe('civilDayToUtcMidnight — local calendar day', () => {
+    it('defaults to the UTC day when no timezone is given', () => {
+      const d = new Date('2026-07-12T23:30:00Z');
+      expect(civilDayToUtcMidnight(d).toISOString()).toBe('2026-07-12T00:00:00.000Z');
+      expect(civilDayToUtcMidnight(d, null).toISOString()).toBe('2026-07-12T00:00:00.000Z');
+      expect(civilDayToUtcMidnight(d, '').toISOString()).toBe('2026-07-12T00:00:00.000Z');
+    });
+
+    it('uses the local day: 23:30 UTC is still July 12 in New York', () => {
+      // 2026-07-12T23:30Z is 19:30 on July 12 in America/New_York (UTC-4).
+      const result = civilDayToUtcMidnight(new Date('2026-07-12T23:30:00Z'), 'America/New_York');
+      expect(result.toISOString()).toBe('2026-07-12T00:00:00.000Z');
+    });
+
+    it('rolls the local day back across the UTC boundary: 02:00 UTC is still July 12 in New York', () => {
+      // 2026-07-13T02:00Z is 22:00 on July 12 in America/New_York — the LOCAL day
+      // is July 12 even though the UTC day is already July 13.
+      const result = civilDayToUtcMidnight(new Date('2026-07-13T02:00:00Z'), 'America/New_York');
+      expect(result.toISOString()).toBe('2026-07-12T00:00:00.000Z');
+    });
+
+    it('rolls the local day forward past UTC: 22:00 UTC is already July 13 in Tokyo', () => {
+      // 2026-07-12T22:00Z is 07:00 on July 13 in Asia/Tokyo (UTC+9).
+      const result = civilDayToUtcMidnight(new Date('2026-07-12T22:00:00Z'), 'Asia/Tokyo');
+      expect(result.toISOString()).toBe('2026-07-13T00:00:00.000Z');
+    });
+
+    it('falls back to UTC for an invalid timezone rather than throwing', () => {
+      const result = civilDayToUtcMidnight(new Date('2026-07-12T23:30:00Z'), 'Not/AZone');
+      expect(result.toISOString()).toBe('2026-07-12T00:00:00.000Z');
+    });
+  });
+
+  describe('computeStreak — timezone-aware day boundaries', () => {
+    it('does NOT extend when two completions fall on the same LOCAL day but different UTC days', () => {
+      // New York user completes at 21:00 local July 12 (01:00Z July 13) then again
+      // at 23:00 local July 12 (03:00Z July 13). Same local day → no change.
+      const result = computeStreak({
+        now: new Date('2026-07-13T03:00:00Z'),
+        lastCompletionDate: civilDayToUtcMidnight(
+          new Date('2026-07-13T01:00:00Z'),
+          'America/New_York',
+        ),
+        currentStreak: 5,
+        longestStreak: 5,
+        timeZone: 'America/New_York',
+      });
+
+      expect(result.currentStreak).toBe(5);
+      expect(result.lastCompletionDate.toISOString()).toBe('2026-07-12T00:00:00.000Z');
+    });
+
+    it('extends across consecutive LOCAL days that share nothing in UTC', () => {
+      // Previous completion stored on local July 12; new completion at 04:00Z
+      // July 14 which is 00:00 local July 14 in New York → next day, extend.
+      const result = computeStreak({
+        now: new Date('2026-07-14T04:00:00Z'),
+        lastCompletionDate: new Date('2026-07-13T00:00:00.000Z'),
+        currentStreak: 2,
+        longestStreak: 2,
+        timeZone: 'America/New_York',
+      });
+
+      expect(result.currentStreak).toBe(3);
+      // Stored as the new completion's LOCAL civil day (July 14 in New York).
+      expect(result.lastCompletionDate.toISOString()).toBe('2026-07-14T00:00:00.000Z');
+    });
+
+    it('reproduces the pure-UTC behaviour when timeZone is omitted', () => {
+      const result = computeStreak({
+        now: new Date('2026-07-13T01:00:00Z'),
+        lastCompletionDate: new Date('2026-07-12T22:00:00Z'),
+        currentStreak: 4,
+        longestStreak: 4,
+      });
+      expect(result.currentStreak).toBe(5);
     });
   });
 });
